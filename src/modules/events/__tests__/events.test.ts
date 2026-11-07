@@ -70,6 +70,31 @@ describe('events', () => {
     expect(json(past).code).toBe('EVENT_IN_PAST');
   });
 
+  it('once published, the organizer reorders the pictures, picks the cover or takes some off, never adds new ones', async () => {
+    const { owner, orgId, body } = await setup();
+    const e = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
+    const [first, second] = e.imageIds as string[];
+    // Before publishing, the pictures change with the rest of the event.
+    expect(json(await call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [second, first], fixedCover: true })).code).toBe('EVENT_NOT_PUBLISHED');
+    await ok(call(owner, 'POST', `/org/${orgId}/events/${e.id}/publish`));
+
+    const swapped = await ok(call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [second, first], fixedCover: true }));
+    expect(swapped).toMatchObject({ status: 'published', imageIds: [second, first], fixedCover: true, images: [e.images[1], e.images[0]] });
+    const s = await registerStudent(t);
+    expect((await ok(call(s, 'GET', `/events/${e.id}`))).images).toEqual([e.images[1], e.images[0]]);
+
+    // A picture the team never saw, or one twice: refused.
+    const fresh = (await t.c.modules.media.service.upload(new ObjectId(owner.userId), 'event', await picture(), 'http://test/api/v1'))._id.toHexString();
+    expect((await call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [fresh, first], fixedCover: false })).statusCode).toBe(400);
+    expect((await call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [first, first], fixedCover: false })).statusCode).toBe(400);
+    expect((await call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [], fixedCover: false })).statusCode).toBe(400);
+
+    // One left: no cover to fix.
+    expect(await ok(call(owner, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [first], fixedCover: true }))).toMatchObject({ imageIds: [first], fixedCover: false });
+    // Someone outside the organization can't touch it.
+    expect((await call(s, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [first], fixedCover: false })).statusCode).toBe(404);
+  });
+
   it('several tickets of several types in one payment; the buyer can give the extra ones; places are counted', async () => {
     const { owner, orgId, body } = await setup();
     const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
@@ -125,6 +150,29 @@ describe('events', () => {
     const ticket = await ok(call(s, 'GET', `/tickets/${booked.booking.tickets[0].ticketId}`));
     expect(ticket).toMatchObject({ paidWith: 'cash', cashDue: 2000 });
     expect(await t.c.mongo.db.collection('payments').countDocuments({ userId: new ObjectId(s.userId) })).toBe(0);
+  });
+
+  it('its organizing team (owner, door staff…) books no ticket for its own event; students do', async () => {
+    const { owner, orgId, body } = await setup({ free: true });
+    const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
+    await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
+    const scanner = await createStaff(t);
+    await t.c.modules.organizations.setMember(new ObjectId(orgId), 'organizer', { phone: scanner.phone, roles: ['scanner'] }, null);
+    const order = { items: [{ typeId: ev.ticketTypes[0].typeId, qty: 1 }], method: 'wave' };
+    for (const who of [owner, { userId: scanner.userId.toHexString() }]) {
+      expect((await ok(call(who, 'GET', `/events/${ev.id}`))).organizedByMe).toBe(true);
+      expect(json(await call(who, 'POST', `/events/${ev.id}/bookings`, order)).code).toBe('OWN_EVENT');
+    }
+    const s = await registerStudent(t);
+    expect((await ok(call(s, 'GET', `/events/${ev.id}`))).organizedByMe).toBe(false);
+    await ok(call(s, 'POST', `/events/${ev.id}/bookings`, order), 201);
+
+    // For friends: allowed, and none of the tickets is the organizer's own (all to give from the ticket).
+    const gift = await ok(call(owner, 'POST', `/events/${ev.id}/bookings`, { ...order, items: [{ typeId: ev.ticketTypes[0].typeId, qty: 2 }], forFriends: true }), 201);
+    expect(gift.booking).toMatchObject({ status: 'confirmed' });
+    const tickets = await t.c.mongo.db.collection('tickets').find({ eventId: new ObjectId(ev.id), holderUserId: new ObjectId(owner.userId) }).toArray();
+    expect(tickets).toHaveLength(2);
+    expect(tickets.every((x) => x.holderTravels === false)).toBe(true);
   });
 
   it('a free event issues its tickets at once', async () => {
@@ -230,12 +278,20 @@ describe('students’ events', () => {
     expect(live).toMatchObject({ status: 'published', salesOpen: true, audience: { ufrs: ['SAT'], villages: ['Village E'] }, publication: { paid: true, payment: null } });
     expect(live.ticketTypes[0]).toMatchObject({ capacity: 60, remaining: 60 });
     expect((await ok(call(s, 'GET', '/notifications'))).items[0]).toMatchObject({ type: 'event.published' });
+    // Published: its pictures may still be reordered (only those the team saw).
+    expect(await ok(call(s, 'PUT', `/me/events/${draft.id}/photos`, { imageIds: [pic], fixedCover: false }))).toMatchObject({ imageIds: [pic], status: 'published' });
     // On the home screen of the students it targets only (the page itself opens for anyone with the link).
     expect((await ok(call(buyer, 'GET', '/events'))).items.map((e: { id: string }) => e.id)).toContain(draft.id);
     // Students don't see the owner's name (their personal entity is named after them).
     expect((await ok(call(buyer, 'GET', `/events/${draft.id}`))).organizer).toMatchObject({ name: '', category: 'Étudiant' });
     expect((await ok(call(elsewhere, 'GET', '/events'))).items.map((e: { id: string }) => e.id)).not.toContain(draft.id);
     expect((await ok(call(buyer, 'GET', `/events/${draft.id}`))).salesOpen).toBe(true);
+    // Its creator runs it: no ticket for them (students may).
+    expect(await ok(call(s, 'GET', `/events/${draft.id}`))).toMatchObject({ organizedByMe: true });
+    expect((await ok(call(buyer, 'GET', `/events/${draft.id}`))).organizedByMe).toBe(false);
+    const own = await call(s, 'POST', `/events/${draft.id}/bookings`, { items: [{ typeId, qty: 1 }], method: 'wave' });
+    expect(own.statusCode).toBe(422);
+    expect(json(own).code).toBe('OWN_EVENT');
 
     // Refused: with its reason.
     const other = await ok(call(s, 'POST', '/me/events', { ...body, title: 'Sortie plage' }), 201);

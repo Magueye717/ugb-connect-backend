@@ -3,7 +3,7 @@
 #   docker compose up -d mongo                      # database only (Redis: the one already on localhost:6379)
 #   docker compose --profile redis up -d            # + Redis, for machines without one
 #   docker compose --profile app up -d --build      # + api and worker containers
-name: ugb-campus
+name: ugb-connect
 
 services:
   mongo:

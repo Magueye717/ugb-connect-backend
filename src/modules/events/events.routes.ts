@@ -40,6 +40,7 @@ const EventView = Type.Object({
   ticketTypes: Type.Array(Type.Object({ typeId: Type.String(), name: Type.String(), description: Nullable(Type.String()), price: Type.Number(), remaining: Type.Number(), soldOut: Type.Boolean() })),
   myTickets: Type.Array(Type.String(), { description: 'My ticket ids for this event.' }),
   myTicketsLeft: Type.Number({ description: 'Tickets I can still buy (maxPerStudent, all orders together).' }),
+  organizedByMe: Type.Boolean({ description: 'I am on the organizing team: I may only order for friends (forFriends), otherwise 422 OWN_EVENT.' }),
   myBooking: Nullable(Type.Object({ id: Type.String(), total: Type.Number(), holdExpiresAt: Type.String(), payment: Nullable(Type.Object({ reference: Type.String(), checkoutUrl: Nullable(Type.String()) })) })),
 });
 const OrgEventView = Type.Object({
@@ -47,8 +48,7 @@ const OrgEventView = Type.Object({
   ticketTypes: Type.Array(Type.Object({ typeId: Type.String(), name: Type.String(), description: Nullable(Type.String()), price: Type.Number(), capacity: Type.Number(), sold: Type.Number(), remaining: Type.Number(), soldOut: Type.Boolean() })),
   counts: Type.Object({ booked: Type.Number(), buyers: Type.Number(), admitted: Type.Number() }),
   claim: Nullable(Type.Object({ amount: Type.Number(), payout: Nullable(Type.Object({ id: Type.String(), status: Type.String(), amount: Type.Number() })) })),
-  reviewLog: Type.Array(Type.Object({ at: Type.String(), action: Type.String({ description: 'submitted | approved | changes_requested | rejected' }), message: Nullable(Type.String()) })),
-  imageIds: Type.Array(Type.String(), { description: 'Same order as images: send them back when editing.' }),
+  reviewLog: Type.Array(Type.Object({ at: Type.String(), action: Type.String({ description: 'submitted | approved | changes_requested | rejected' }), message: Nullable(Type.String()) })),  imageIds: Type.Array(Type.String(), { description: 'Same order as images: send them back when editing.' }),
   fixedCover: Type.Boolean({ description: 'The first picture is the chosen cover; otherwise the banner picks one at random.' }),
   audience: Type.Object({ campuses: Type.Array(Type.String()), ufrs: Type.Array(Type.String()), regions: Type.Array(Type.String()), villages: Type.Array(Type.String()) }, { description: 'Who sees it on the home screen; all empty: the whole university.' }),
   publicationFee: Type.Object({ perPlace: Type.Number(), minimum: Type.Number() }, { description: 'Students’ events: the publication costs perPlace × places, at least minimum.' }),
@@ -111,6 +111,13 @@ const EventInput = Type.Object(
   },
   { additionalProperties: false },
 );
+const PhotosInput = Type.Object(
+  {
+    imageIds: Type.Array(ObjectIdString, { minItems: 1, maxItems: 8, description: 'Some of the event’s own pictures, in the new order (the first is the cover).' }),
+    fixedCover: Type.Boolean({ description: 'The first picture is the cover of its banners; otherwise one at random.' }),
+  },
+  { additionalProperties: false },
+);
 const OrgParams = Type.Object({ orgId: ObjectIdString }, { additionalProperties: false });
 const OrgEventParams = Type.Object({ orgId: ObjectIdString, id: ObjectIdString }, { additionalProperties: false });
 
@@ -144,6 +151,7 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
           {
             items: Type.Array(Type.Object({ typeId: Type.String({ maxLength: 8 }), qty: Type.Integer({ minimum: 0, maximum: 20 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 6 }),
             method: Type.Enum(TICKET_PAYMENT_METHODS, { description: 'One the event accepts. cash: the tickets are issued at once, paid at the door (payment is null).' }),
+            forFriends: Type.Optional(Type.Boolean({ description: 'Its organizing team orders only so (otherwise 422 OWN_EVENT): every ticket is one to give, none is theirs.' })),
             returnUrl: Type.Optional(Type.String({ maxLength: 300 })),
           },
           { additionalProperties: false },
@@ -198,6 +206,17 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
     await trace(req, 'event.update', req.params.id, { by: 'student' });
     return service.orgEvent(orgId, e._id);
   });
+
+  app.put(
+    '/me/events/:id/photos',
+    { ...student, schema: { tags, params: IdParams, description: 'A published event: reorder its pictures, pick the cover, take some off.', body: PhotosInput, response: { 200: OrgEventView } } },
+    async (req) => {
+      const orgId = await myOrg(req);
+      const e = await service.updatePhotos(orgId, toObjectId(req.params.id), req.body);
+      await trace(req, 'event.photos', req.params.id, { by: 'student', count: req.body.imageIds.length, fixedCover: req.body.fixedCover });
+      return service.orgEvent(orgId, e._id);
+    },
+  );
 
   app.post('/me/events/:id/submit', { ...student, schema: { tags, params: IdParams, response: { 200: OrgEventView } } }, async (req) => {
     const orgId = await myOrg(req);
@@ -285,6 +304,16 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
     await trace(req, 'event.update', req.params.id);
     return service.orgEvent(e.orgId, e._id);
   });
+
+  app.put(
+    '/org/:orgId/events/:id/photos',
+    { ...org(managers), schema: { tags, params: OrgEventParams, description: 'A published event: reorder its pictures, pick the cover, take some off.', body: PhotosInput, response: { 200: OrgEventView } } },
+    async (req) => {
+      const e = await service.updatePhotos(toObjectId(req.params.orgId), toObjectId(req.params.id), req.body);
+      await trace(req, 'event.photos', req.params.id, { count: req.body.imageIds.length, fixedCover: req.body.fixedCover });
+      return service.orgEvent(e.orgId, e._id);
+    },
+  );
 
   app.post('/org/:orgId/events/:id/publish', { ...org(managers), schema: { tags, params: OrgEventParams, response: { 200: OrgEventView } } }, async (req) => {
     const e = await service.publish(toObjectId(req.params.orgId), toObjectId(req.params.id));

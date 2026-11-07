@@ -2,7 +2,7 @@
   "name": "ugb-connect-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "UGB Campus backend: Fastify modular monolith",
+  "description": "UGB Connect backend: Fastify modular monolith",
   "type": "module",
   "engines": {
     "node": ">=22.12"

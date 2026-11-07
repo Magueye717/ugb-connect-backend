@@ -9,7 +9,7 @@ import type { Limiter } from '../../platform/security/limiter.js';
 import { CAMPUSES, REGIONS, UFR_CODES, VILLAGES, type AccountsApi, type AudienceProfile, type Campus, type Region, type UfrCode } from '../accounts/index.js';
 import type { MediaApi } from '../media/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
-import type { OrgCard, OrganizationsApi } from '../organizations/index.js';
+import type { OrgCard, OrganizationsApi, OrgRole } from '../organizations/index.js';
 import { PAYMENT_METHODS, type PaymentMethod, type PaymentsApi, type PayoutDoc, type PurposeHandler } from '../payments/index.js';
 import type { EventSummary, TicketingApi, TicketKindHandler } from '../ticketing/index.js';
 import { TICKET_PAYMENT_LABELS, type TicketPaymentMethod } from '../ticketing/index.js';
@@ -30,6 +30,8 @@ import {
 } from './events.types.js';
 
 const MIN = 60_000;
+/** Everyone on an organizer space's team: none of them books its events. */
+const ORGANIZER_TEAM: OrgRole[] = ['owner', 'manager', 'scanner', 'staff'];
 const dakar = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Dakar', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fcfa = (n: number) => `${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} FCFA`;
 
@@ -131,6 +133,8 @@ export class EventsService {
     if (!docs.length) return [];
     const cards = await this.organizations.cards([...new Map(docs.map((d) => [d.orgId.toHexString(), d.orgId])).values()]);
     const mine = await this.bookings.find({ eventId: { $in: docs.map((d) => d._id) }, userId: viewerId, status: { $in: ['held', 'confirmed'] } }).toArray();
+    const orgIds = [...new Map(docs.map((d) => [d.orgId.toHexString(), d.orgId])).values()];
+    const organized = new Set((await Promise.all(orgIds.map(async (o) => ((await this.organizes(o, viewerId)) ? o.toHexString() : null)))).filter(Boolean));
     const now = this.clock.now();
     return Promise.all(
       docs.map(async (e) => {
@@ -142,12 +146,18 @@ export class EventsService {
           ...this.publicView(e, shownOrganizer(cards.get(e.orgId.toHexString())!), now),
           myTickets: my.filter((b) => b.status === 'confirmed').flatMap((b) => b.units.filter((u) => u.status === 'confirmed' && u.ticketId).map((u) => u.ticketId!.toHexString())),
           myTicketsLeft: Math.max(0, e.maxPerStudent - bought),
+          organizedByMe: organized.has(e.orgId.toHexString()),
           myBooking: held
             ? { id: held._id.toHexString(), total: held.total, holdExpiresAt: held.holdExpiresAt.toISOString(), payment: payment ? { reference: payment.reference, checkoutUrl: payment.checkoutUrl } : null }
             : null,
         };
       }),
     );
+  }
+
+  /** On the event's organizing team (its organizer space, any role): they run it, they don't buy tickets for it. */
+  private async organizes(orgId: ObjectId, userId: ObjectId) {
+    return !!(await this.organizations.roleIn(orgId, userId, ORGANIZER_TEAM, 'organizer'));
   }
 
   private publicView(e: EventDoc, organizer: OrgCard, now: Date) {
@@ -179,8 +189,9 @@ export class EventsService {
   /**
    * Holds the tickets for 10 minutes and opens one payment (none for a free event: the tickets are issued at once).
    * Places are taken with a conditional update per ticket type: two students can never take the last place twice.
+   * Its organizing team orders only `forFriends`: every ticket is then one to give, none is theirs.
    */
-  async book(userId: ObjectId, eventId: ObjectId, input: { items: { typeId: string; qty: number }[]; method: TicketPaymentMethod; returnUrl?: string | null }, baseUrl: string) {
+  async book(userId: ObjectId, eventId: ObjectId, input: { items: { typeId: string; qty: number }[]; method: TicketPaymentMethod; forFriends?: boolean; returnUrl?: string | null }, baseUrl: string) {
     await this.limiter.hit(`event-book:${userId.toHexString()}`, { limit: 20, windowS: 3600 });
     // Cash: nothing to pay here, the tickets are issued at once and paid at the door.
     const cash = input.method === 'cash';
@@ -189,6 +200,9 @@ export class EventsService {
     const e = await this.get(eventId);
     const now = this.clock.now();
     if (e.status !== 'published' || now >= e.salesCloseAt) throw errors.conflict('SALES_CLOSED', 'La billetterie est fermée pour cet événement.');
+    const organizer = await this.organizes(e.orgId, userId);
+    if (organizer && !input.forFriends) throw errors.rule('OWN_EVENT', 'C’est ton événement : tu peux seulement commander des billets pour tes amis.');
+    const forFriends = organizer;
 
     const held = await this.bookings.findOne({ eventId, userId, status: 'held' });
     if (held?.paymentId) {
@@ -235,7 +249,10 @@ export class EventsService {
             session,
           )
         : null;
-      const booking: EventBookingDoc = { _id: bookingId, eventId, userId, units, total, method: input.method, status: 'held', holdExpiresAt, paymentId: payment?._id ?? null, createdAt: now, updatedAt: now };
+      const booking: EventBookingDoc = {
+        _id: bookingId, eventId, userId, units, total, method: input.method, status: 'held', holdExpiresAt, paymentId: payment?._id ?? null,
+        ...(forFriends ? { forFriends: true } : {}), createdAt: now, updatedAt: now,
+      };
       await this.bookings.insertOne(booking, { session });
       // Free, or cash at the door: nothing to pay here, the tickets are issued now.
       if (!payment) await this.confirm(booking, total > 0 ? input.method : cash ? 'wave' : input.method, session);
@@ -301,12 +318,13 @@ export class EventsService {
 
   /**
    * One ticket per unit. The student travels on the first one unless they already hold one for this event; the
-   * others are theirs to give to friends (the transfer makes them the friend's).
+   * others are theirs to give to friends (the transfer makes them the friend's). Ordered for friends (its organizer):
+   * all of them are to give.
    */
   private async confirm(b: EventBookingDoc, method: TicketPaymentMethod, session: ClientSession): Promise<'fulfilled' | 'unfulfillable'> {
     const e = (await this.events.findOne({ _id: b.eventId }, { session }))!;
     if (e.status !== 'published') return 'unfulfillable';
-    let holderTravels = !(await this.ticketing.hasActiveTicket(e._id, b.userId, session));
+    let holderTravels = !b.forFriends && !(await this.ticketing.hasActiveTicket(e._id, b.userId, session));
     const now = this.clock.now();
     const units: BookingUnit[] = [];
     for (const u of b.units) {
@@ -464,6 +482,26 @@ export class EventsService {
     if (e.status === 'pending_review') throw errors.conflict('EVENT_IN_REVIEW', 'Cet événement est en cours de validation : attends la réponse de l’équipe.');
     if (e.status !== 'draft' && e.status !== 'changes_requested') throw errors.conflict('EVENT_PUBLISHED', 'Un événement publié ne se modifie plus : annule-le et crée-en un autre.');
     await this.events.updateOne({ _id: id, status: e.status }, { $set: { ...(await this.fields(orgId, by, input)), updatedAt: this.clock.now() } });
+    return this.own(orgId, id);
+  }
+
+  /**
+   * A published event's pictures: the organizer reorders them, picks the cover (shown first, and on its banners) or
+   * takes some off. Only those already on the event, which the team saw: a new picture would skip the review.
+   */
+  async updatePhotos(orgId: ObjectId, id: ObjectId, input: { imageIds: string[]; fixedCover: boolean }) {
+    const e = await this.own(orgId, id);
+    if (e.status !== 'published') throw errors.conflict('EVENT_NOT_PUBLISHED', 'Les photos se changent ici une fois l’événement publié.');
+    if (new Set(input.imageIds).size !== input.imageIds.length) throw errors.validation('Une photo est en double.', { field: 'imageIds' });
+    const images = input.imageIds.map((imgId) => {
+      const found = e.images.find((i) => i.mediaId.toHexString() === imgId);
+      if (!found) throw errors.validation('Seules les photos déjà sur l’événement peuvent être gardées.', { field: 'imageIds' });
+      return found;
+    });
+    const res = await this.events.updateOne({ _id: id, status: 'published' }, { $set: { images, fixedCover: input.fixedCover && images.length > 1, updatedAt: this.clock.now() } });
+    if (!res.matchedCount) throw errors.conflict('EVENT_NOT_PUBLISHED', 'L’événement a changé entre-temps : recharge la page.');
+    // Pictures taken off leave the storage.
+    await this.media.release(e.images.filter((old) => !images.some((i) => i.mediaId.equals(old.mediaId))).map((i) => i.mediaId));
     return this.own(orgId, id);
   }
 

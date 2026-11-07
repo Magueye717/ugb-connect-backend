@@ -7,9 +7,9 @@
 
 services:
   - type: web
-    name: ugb-campus-api-staging
+    name: ugb-connect-api-staging
     runtime: docker
-    repo: https://github.com/Magueye717/ugb-campus-backend
+    repo: https://github.com/Magueye717/ugb-connect-backend
     branch: staging
     region: frankfurt
     plan: starter
@@ -21,19 +21,19 @@ services:
     healthCheckPath: /health/ready
     autoDeploy: true
     envVars:
-      - fromGroup: ugb-campus-backend-staging
+      - fromGroup: ugb-connect-backend-staging
       - key: PORT
         value: 3000
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: ugb-campus-redis-staging
+          name: ugb-connect-redis-staging
           property: connectionString
 
   - type: worker
-    name: ugb-campus-worker-staging
+    name: ugb-connect-worker-staging
     runtime: docker
-    repo: https://github.com/Magueye717/ugb-campus-backend
+    repo: https://github.com/Magueye717/ugb-connect-backend
     branch: staging
     region: frankfurt
     plan: starter
@@ -41,17 +41,17 @@ services:
     dockerCommand: node dist/main.js worker
     autoDeploy: true
     envVars:
-      - fromGroup: ugb-campus-backend-staging
+      - fromGroup: ugb-connect-backend-staging
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: ugb-campus-redis-staging
+          name: ugb-connect-redis-staging
           property: connectionString
 
   # Queues (BullMQ) and rate limits. Paid plan: kept on disk across restarts. `noeviction`: a full Redis refuses new
   # jobs instead of silently dropping queued ones.
   - type: keyvalue
-    name: ugb-campus-redis-staging
+    name: ugb-connect-redis-staging
     region: frankfurt
     plan: starter
     maxmemoryPolicy: noeviction
@@ -59,7 +59,7 @@ services:
     ipAllowList: []
 
 envVarGroups:
-  - name: ugb-campus-backend-staging
+  - name: ugb-connect-backend-staging
     envVars:
       - key: NODE_ENV
         value: production
@@ -74,6 +74,8 @@ envVarGroups:
       - key: DOCS_ENABLED
         value: true
 
+      # Atlas cluster `ugbconnect`: mongodb+srv://USER:PASSWORD@ugbconnect.xxxxx.mongodb.net/?retryWrites=true&w=majority
+      # (no database in the path: MONGODB_DB names it; a password with @ : / ? # % must be URL-encoded).
       - key: MONGODB_URI
         sync: false
       # The first administrator: created by the pre-deploy step if no account uses this phone, never changed after.
@@ -81,8 +83,9 @@ envVarGroups:
         sync: false
       - key: BOOTSTRAP_ADMIN_PASSWORD
         sync: false
+      # Must match the Atlas database name exactly (production: ugb_connect).
       - key: MONGODB_DB
-        value: ugb-campus-staging
+        value: ugb_connect_staging
       - key: REDIS_PREFIX
         value: ugb
 
@@ -115,7 +118,7 @@ envVarGroups:
       - key: S3_ENDPOINT
         sync: false
       - key: S3_BUCKET
-        sync: false
+        value: ugb-connect-media-staging
       - key: S3_REGION
         value: auto
       - key: S3_ACCESS_KEY_ID

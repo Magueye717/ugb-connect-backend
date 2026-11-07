@@ -217,7 +217,7 @@ ugb-connect-backend/
   - `minio`, plus a one-shot job that creates the bucket
   - `api` (watch mode)
   - `worker`
-- **Using the existing `localhost:27017`** (your requirement): the compose `mongo` service sits behind a profile, so it can be skipped. `MONGODB_URI=mongodb://localhost:27017/ugb_campus?replicaSet=rs0`, or `host.docker.internal` from inside containers. **The local `mongod` must run as a replica set** (`mongod --replSet rs0`, then `rs.initiate()` once). Otherwise transactions fail. See Q-18.
+- **Using the existing `localhost:27017`** (your requirement): the compose `mongo` service sits behind a profile, so it can be skipped. `MONGODB_URI=mongodb://localhost:27017/ugb_connect?replicaSet=rs0`, or `host.docker.internal` from inside containers. **The local `mongod` must run as a replica set** (`mongod --replSet rs0`, then `rs.initiate()` once). Otherwise transactions fail. See Q-18.
 - **Health checks:**
   - `/health/live`: the process is up.
   - `/health/ready`: Mongo ping, Redis ping, migrations applied. The load balancer only routes to ready pods.

@@ -86,6 +86,8 @@ export type EventBookingDoc = {
   status: EventBookingStatus;
   holdExpiresAt: Date;
   paymentId: ObjectId | null;
+  /** Ordered by the organizing team: every ticket is one to give (none for them). */
+  forFriends?: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
