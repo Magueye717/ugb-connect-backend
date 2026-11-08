@@ -83,6 +83,11 @@ export type ItemSection = (typeof ITEM_SECTIONS)[number];
 
 /** An article shown from several sides (a bag, a dress…): the cover and up to five more. */
 export const MAX_ITEM_PHOTOS = 6;
+/**
+ * Référencement (the team documenting a restaurant or a shop) isn't held to the owners' limit: as many as a full
+ * catalogue needs, with a ceiling only so that a slip can't fill the storage.
+ */
+export const EDITOR_MAX_ITEM_PHOTOS = 30;
 
 export type CatalogItemDoc = {
   _id: ObjectId;

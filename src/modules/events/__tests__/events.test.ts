@@ -276,6 +276,9 @@ describe('students’ events', () => {
     expect((await pay(payment.reference)).statusCode).toBe(200);
     const live = await ok(call(s, 'GET', `/me/events/${draft.id}`));
     expect(live).toMatchObject({ status: 'published', salesOpen: true, audience: { ufrs: ['SAT'], villages: ['Village E'] }, publication: { paid: true, payment: null } });
+    // The admins' « En cours »: what's validated or on sale and not over yet.
+    expect((await ok(call(admin, 'GET', '/admin/events?status=live'))).items.map((x: { id: string }) => x.id)).toContain(draft.id);
+    expect((await ok(call(admin, 'GET', '/admin/events?status=pending_review'))).items.map((x: { id: string }) => x.id)).not.toContain(draft.id);
     expect(live.ticketTypes[0]).toMatchObject({ capacity: 60, remaining: 60 });
     expect((await ok(call(s, 'GET', '/notifications'))).items[0]).toMatchObject({ type: 'event.published' });
     // Published: its pictures may still be reordered (only those the team saw).

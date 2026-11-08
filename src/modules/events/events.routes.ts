@@ -260,7 +260,14 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
   const admin = { preHandler: [requireAuth, requireAdmin] };
   app.get(
     '/admin/events',
-    { ...admin, schema: { tags, querystring: Type.Object({ status: Type.Optional(Type.Enum(['pending_review', 'changes_requested', 'rejected'] as const)) }, { additionalProperties: false }), response: { 200: Type.Object({ items: Type.Array(OrgEventView) }) } } },
+    {
+      ...admin,
+      schema: {
+        tags,
+        querystring: Type.Object({ status: Type.Optional(Type.Enum(['pending_review', 'changes_requested', 'rejected', 'live'] as const, { description: 'live: validated or on sale, not over yet (soonest first).' })) }, { additionalProperties: false }),
+        response: { 200: Type.Object({ items: Type.Array(OrgEventView) }) },
+      },
+    },
     async (req) => ({ items: await service.listForReview(req.query.status) }),
   );
 

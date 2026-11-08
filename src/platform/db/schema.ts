@@ -7,16 +7,42 @@ export type CollectionSpec = {
   indexes: { key: IndexSpecification; options?: CreateIndexesOptions & { name: string } }[];
 };
 
-/** Idempotent: creates missing collections, updates validators, creates missing indexes. */
+/**
+ * Idempotent: creates missing collections, updates validators, creates missing indexes. A validator is rewritten only
+ * when its rule changed: `collMod` needs the dbAdmin role, which a deploy that changes no rule must not require (the
+ * database users of staging and production may have readWrite only).
+ */
 export async function applyCollectionSpecs(db: Db, specs: CollectionSpec[]) {
-  const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((c) => c.name));
+  const existing = new Map((await db.listCollections().toArray()).map((c) => [c.name, ('options' in c ? c.options : undefined) ?? {}]));
   for (const spec of specs) {
     const validation = spec.validator ? { validator: spec.validator, validationLevel: 'strict', validationAction: 'error' } : {};
-    if (!existing.has(spec.name)) await db.createCollection(spec.name, validation);
-    else if (spec.validator) await db.command({ collMod: spec.name, ...validation });
+    const current = existing.get(spec.name);
+    if (!current) await db.createCollection(spec.name, validation);
+    else if (spec.validator && !sameValidation(current, validation)) await db.command({ collMod: spec.name, ...validation });
     for (const ix of spec.indexes) await db.collection(spec.name).createIndex(ix.key, ix.options);
   }
 }
+
+/** The collection's stored rule against the declared one, whatever the key order. */
+function sameValidation(current: Document, wanted: Document) {
+  return (
+    canonical(current.validator) === canonical(wanted.validator) &&
+    (current.validationLevel ?? 'strict') === wanted.validationLevel &&
+    (current.validationAction ?? 'error') === wanted.validationAction
+  );
+}
+
+const canonical = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v ?? null);
+};
 
 /** `$jsonSchema` helpers: keep validators short and readable. */
 export const bson = {

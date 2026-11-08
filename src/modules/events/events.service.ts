@@ -529,9 +529,15 @@ export class EventsService {
 
   // ---- Admins: students' events --------------------------------------------------------------------------------
 
-  /** The review queue (oldest first), or events in another review status. */
-  async listForReview(status: 'pending_review' | 'changes_requested' | 'rejected' = 'pending_review') {
-    const docs = await this.events.find({ status }).sort({ updatedAt: 1 }).limit(100).toArray();
+  /**
+   * The review queue (oldest first), or events in another review status. `live`: every event validated or on sale and
+   * not over yet, students' and organizations' alike, the soonest first (the admins keep an eye on what runs).
+   */
+  async listForReview(status: 'pending_review' | 'changes_requested' | 'rejected' | 'live' = 'pending_review') {
+    const docs =
+      status === 'live'
+        ? await this.events.find({ status: { $in: ['approved', 'published'] }, endsAt: { $gt: this.clock.now() } }).sort({ startsAt: 1 }).limit(200).toArray()
+        : await this.events.find({ status }).sort({ updatedAt: 1 }).limit(100).toArray();
     return this.orgViews(docs);
   }
 
@@ -779,7 +785,7 @@ export class EventsService {
 
   /** After the event: the paid tickets (and fees kept on late cancellations) to the organization's number. Once. */
   async claim(orgId: ObjectId, id: ObjectId, userId: ObjectId, method: PaymentMethod): Promise<PayoutDoc> {
-    const phone = await this.organizations.payoutPhone(orgId);
+    const phone = await this.organizations.payoutPhone(orgId, method);
     if (!phone) throw errors.rule('NO_PAYOUT_ACCOUNT', 'Aucun numéro de paiement pour l’organisation. Demande à l’équipe UGB Connect de l’enregistrer.');
     let payout!: PayoutDoc;
     await withTransaction(this.mongo, async (session) => {

@@ -1,4 +1,4 @@
-import { ObjectId, type Collection, type Db } from 'mongodb';
+import { ObjectId, type Collection, type Db, type Document } from 'mongodb';
 
 import type { Clock } from '../../platform/clock.js';
 import { isDuplicateKey } from '../../platform/db/mongo.js';
@@ -8,7 +8,7 @@ import { normalizeEmail } from '../../platform/email.js';
 import { normalizePhone } from '../../platform/phone.js';
 import type { AccountsApi, MembershipSummary } from '../accounts/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
-import { spacesOf, type MembershipDoc, type OrgCapability, type OrgCategory, type OrgLevel, type OrgRole, type OrgSpace, type OrganizationDoc } from './organizations.types.js';
+import { PAYOUT_PROVIDERS, spacesOf, type MembershipDoc, type OrgCapability, type OrgCategory, type OrgLevel, type OrgRole, type OrgSpace, type OrganizationDoc, type PayoutProvider } from './organizations.types.js';
 
 /** How each space names its roles (what the member is told, what the team list shows). */
 export const SPACE_LABELS: Record<OrgSpace, string> = { organizer: 'Organisateur', restaurant: 'Restaurant', shop: 'Boutique' };
@@ -75,6 +75,31 @@ export class OrganizationsService {
       throw err;
     }
     return doc;
+  }
+
+  /**
+   * A number per provider (Wave, Orange Money): null takes it off. Each is checked as a Senegalese mobile number.
+   */
+  async setPayoutNumbers(id: ObjectId, numbers: Partial<Record<PayoutProvider, string | null>>) {
+    const $set: Document = { updatedAt: this.clock.now() };
+    const $unset: Document = {};
+    for (const p of PAYOUT_PROVIDERS) {
+      if (!(p in numbers)) continue;
+      const n = numbers[p];
+      if (!n) $unset[`payoutAccounts.${p}`] = '';
+      else {
+        const phone = normalizePhone(n);
+        if (!phone) throw errors.validation(`Numéro ${p === 'wave' ? 'Wave' : 'Orange Money'} invalide.`, { field: `payoutNumbers.${p}` });
+        $set[`payoutAccounts.${p}`] = phone;
+      }
+    }
+    await this.orgs.updateOne({ _id: id }, { $set, ...(Object.keys($unset).length ? { $unset } : {}) });
+  }
+
+  /** Where a payout through `provider` goes: its own number, else the organization's one. */
+  async payoutNumbers(id: ObjectId) {
+    const o = await this.get(id);
+    return Object.fromEntries(PAYOUT_PROVIDERS.map((p) => [p, o.payoutAccounts?.[p] ?? o.payoutAccount?.phone ?? null])) as Record<PayoutProvider, string | null>;
   }
 
   async update(id: ObjectId, input: UpdateOrgInput) {

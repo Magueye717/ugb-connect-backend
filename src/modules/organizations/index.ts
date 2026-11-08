@@ -11,12 +11,12 @@ import type { NotificationsApi } from '../notifications/index.js';
 import { organizationsCollections, organizationsMigrations } from './organizations.collections.js';
 import { registerOrganizationsRoutes } from './organizations.routes.js';
 import { OrganizationsService, type CreateOrgInput } from './organizations.service.js';
-import { ORG_SPACES, type OrgCapability, type OrgRole, type OrgSpace } from './organizations.types.js';
+import { ORG_SPACES, type OrgCapability, type OrgRole, type OrgSpace, type PayoutProvider } from './organizations.types.js';
 import type { MediaUsage } from '../media/index.js';
 
 export { organizationsCollections, organizationsMigrations };
-export type { OrgCapability, OrgRole, OrgLevel, OrgCategory, OrgSpace } from './organizations.types.js';
-export { ORG_SPACES, spacesOf } from './organizations.types.js';
+export type { OrgCapability, OrgRole, OrgLevel, OrgCategory, OrgSpace, PayoutProvider } from './organizations.types.js';
+export { ORG_SPACES, PAYOUT_PROVIDERS, spacesOf } from './organizations.types.js';
 export type { OrgCard } from './organizations.service.js';
 
 export type OrganizationsApi = OrganizationsPort & {
@@ -33,8 +33,11 @@ export type OrganizationsApi = OrganizationsPort & {
   cards: OrganizationsService['cards'];
   /** Active members of a space and their roles: who to notify (a restaurant's new order), who owns it. */
   members(orgId: ObjectId, space: OrgSpace): Promise<{ userId: ObjectId; roles: OrgRole[] }[]>;
-  /** Where an organization's claims are paid; null until an admin sets it. */
-  payoutPhone(orgId: ObjectId): Promise<string | null>;
+  /** Where an organization's claims are paid (through `provider`: its own number if set); null until one is set. */
+  payoutPhone(orgId: ObjectId, provider?: string): Promise<string | null>;
+  /** Each provider's number (its own, else the organization's): shown to the owner and Référencement only. */
+  payoutNumbers(orgId: ObjectId): Promise<Record<PayoutProvider, string | null>>;
+  setPayoutNumbers(orgId: ObjectId, numbers: Partial<Record<PayoutProvider, string | null>>): Promise<void>;
   /** Is the organization active and verified for this (e.g. selling event tickets)? */
   can(orgId: ObjectId, capability: OrgCapability): Promise<boolean>;
   /**
@@ -76,7 +79,12 @@ export function createOrganizationsModule(deps: { db: Db; clock: Clock; accounts
     addCapability: (o, c) => service.addCapability(o, c),
     cards: (ids) => service.cards(ids),
     members: async (orgId, space) => (await deps.db.collection('memberships').find({ orgId, space, status: 'active' }, { projection: { userId: 1, roles: 1 } }).toArray()).map((m) => ({ userId: m.userId, roles: m.roles })),
-    payoutPhone: async (orgId) => (await service.get(orgId)).payoutAccount?.phone ?? null,
+    payoutPhone: async (orgId, provider) => {
+      const o = await service.get(orgId);
+      return (provider && o.payoutAccounts?.[provider as PayoutProvider]) || o.payoutAccount?.phone || null;
+    },
+    payoutNumbers: (orgId) => service.payoutNumbers(orgId),
+    setPayoutNumbers: (orgId, n) => service.setPayoutNumbers(orgId, n),
     personalOrg: async (user, create = true) => {
       const slug = `etudiant-${user._id.toHexString()}`;
       const existing = await deps.db.collection('organizations').findOne({ slug }, { projection: { _id: 1 } });

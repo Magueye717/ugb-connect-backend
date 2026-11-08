@@ -8,7 +8,7 @@ import { CAMPUSES } from '../accounts/index.js';
 import type { AuditApi } from '../audit/index.js';
 import type { PlacesService } from './places.service.js';
 import { CAMPUS_BOUNDS, CAMPUS_OUTLINE, CAMPUS_START } from './places.campus.js';
-import { PLACE_CATEGORIES } from './places.types.js';
+import { PLACE_CATEGORIES, PLACE_MAX_PHOTOS } from './places.types.js';
 
 const PlaceView = Type.Object({
   id: Type.String(),
@@ -35,7 +35,7 @@ const PlaceFields = {
   location: Type.Object({ lat: Type.Number({ minimum: -90, maximum: 90 }), lng: Type.Number({ minimum: -180, maximum: 180 }) }, { additionalProperties: false }),
   hours: Type.Optional(Nullable(Type.String({ maxLength: 60 }))),
   icon: Type.Optional(Type.String({ pattern: '^[a-z-]+$', maxLength: 40 })),
-  photos: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 6, description: 'Upload ids (POST /media/images?purpose=place) or photoRefs to keep; the first is the cover.' })),
+  photos: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: PLACE_MAX_PHOTOS, description: 'Upload ids (POST /media/images?purpose=place) or photoRefs to keep; the first is the cover.' })),
   active: Type.Optional(Type.Boolean()),
   sortOrder: Type.Optional(Type.Number()),
 };

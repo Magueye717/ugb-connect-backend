@@ -9,7 +9,7 @@ import type { Limiter } from '../../platform/security/limiter.js';
 import { CAMPUS_LABELS, type AccountsApi, type Campus } from '../accounts/index.js';
 import type { MediaApi } from '../media/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
-import type { OrganizationsApi } from '../organizations/index.js';
+import { PAYOUT_PROVIDERS, type OrganizationsApi, type PayoutProvider } from '../organizations/index.js';
 import type { PaymentMethod, PaymentsApi, PurposeHandler } from '../payments/index.js';
 import { type BusinessDoc, type BusinessKind, type CatalogItemDoc, DEFAULT_PAYMENT_METHODS, type ItemLikeDoc, LIKEABLE_KINDS, DELIVERY_ZONE_LABELS, DELIVERY_ZONES, type DeliveryFees, type DeliveryZone, type ItemSection, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ONLINE_PAYMENT_METHODS, onlinePaymentsAllowed, ORDER_AUTO_COMPLETE_H, ORDER_PAY_WITHIN_MIN, ORDER_PAYMENT_LABELS, ORDER_PAYMENT_METHODS, type OrderDoc, type OrderLine, type OrderMode, type OrderPaymentMethod, type OrderStatus, SALES_MAX_DAYS, SALES_TOP_ITEMS, type Service, SPECIALTIES } from './commerce.types.js';
 
@@ -43,6 +43,8 @@ export type BusinessInput = {
   services?: Service[];
   deliveryFees?: DeliveryFees;
   acceptingOrders?: boolean;
+  /** Where each provider's money goes (null: back to the organization's number). Required for each one accepted. */
+  payoutNumbers?: Partial<Record<PayoutProvider, string | null>>;
 };
 
 /** A business is found by its organization and its kind: one entity may run a restaurant and a shop. */
@@ -254,10 +256,30 @@ export class CommerceService {
     if (input.deliveryFees !== undefined) set.deliveryFees = { ...NO_DELIVERY, ...input.deliveryFees };
     if (input.acceptingOrders !== undefined) set.acceptingOrders = input.acceptingOrders;
     if (input.paymentMethods !== undefined) set.paymentMethods = this.checkMethods(input.paymentMethods, b);
+    // Each provider accepted pays out to a number (its own, or the organization's): checked before anything is saved.
+    if (input.payoutNumbers !== undefined || input.paymentMethods !== undefined) await this.checkPayoutNumbers(b.orgId, set.paymentMethods ?? b.paymentMethods, input.payoutNumbers);
     await this.businesses.updateOne({ _id: b._id }, { $set: set });
     // The previous photo leaves the storage once the new one is saved.
     if (set.photo !== undefined && !(set.photo && b.photo && set.photo.mediaId.equals(b.photo.mediaId))) await this.media.release([b.photo?.mediaId]);
     return (await this.businesses.findOne({ _id: b._id }))!;
+  }
+
+  /**
+   * Wave and Orange Money, when accepted, each need a payout number. `numbers` sent: saved first (a number taken off
+   * falls back to the organization's), then the rule is checked on what's stored.
+   */
+  private async checkPayoutNumbers(orgId: ObjectId, methods: OrderPaymentMethod[], numbers?: Partial<Record<PayoutProvider, string | null>>) {
+    if (numbers) await this.organizations.setPayoutNumbers(orgId, numbers);
+    const stored = await this.organizations.payoutNumbers(orgId);
+    const missing = methods.filter((m): m is PayoutProvider => (PAYOUT_PROVIDERS as readonly string[]).includes(m) && !stored[m as PayoutProvider]);
+    if (missing.length) {
+      throw errors.validation(`Indique le numéro de versement ${missing[0] === 'wave' ? 'Wave' : 'Orange Money'} : c’est là que l’argent des commandes arrive.`, { field: `payoutNumbers.${missing[0]}` });
+    }
+  }
+
+  /** The payout numbers, for the owner and Référencement only (never the students' view). */
+  payoutNumbers(b: BusinessDoc) {
+    return this.organizations.payoutNumbers(b.orgId);
   }
 
   /** Everything in the catalog, unavailable items included (the business's view). */
@@ -270,21 +292,22 @@ export class CommerceService {
     if (!allowed.includes(section)) throw errors.validation(b.kind === 'restaurant' ? 'Un restaurant propose des menus et des boissons.' : 'Une boutique propose des articles.', { field: 'section' });
   }
 
-  async addItem(ref: BusinessRef, by: ObjectId, input: ItemInput) {
+  /** `maxPhotos`: the owners' limit, or Référencement's (EDITOR_MAX_ITEM_PHOTOS) from its own routes. */
+  async addItem(ref: BusinessRef, by: ObjectId, input: ItemInput, maxPhotos = MAX_ITEM_PHOTOS) {
     const b = await this.ofOrg(ref);
     this.checkSection(b, input.section);
     const now = this.clock.now();
     const orderable = input.orderable ?? true;
     const doc: CatalogItemDoc = {
       _id: new ObjectId(), businessId: b._id, section: input.section, category: input.category?.trim() || null, name: input.name.trim(), detail: input.detail?.trim() ?? '', price: input.price,
-      photos: await this.itemPhotos(by, requestedPhotos(input) ?? [], []), stock: b.kind === 'shop' && orderable ? (input.stock ?? null) : null, available: input.available ?? true, orderable,
+      photos: await this.itemPhotos(by, requestedPhotos(input) ?? [], [], maxPhotos), stock: b.kind === 'shop' && orderable ? (input.stock ?? null) : null, available: input.available ?? true, orderable,
       likes: 0, sortOrder: input.sortOrder ?? now.getTime(), archivedAt: null, createdAt: now, updatedAt: now,
     };
     await this.items.insertOne(doc);
     return doc;
   }
 
-  async updateItem(ref: BusinessRef, by: ObjectId, itemId: ObjectId, input: Partial<ItemInput>) {
+  async updateItem(ref: BusinessRef, by: ObjectId, itemId: ObjectId, input: Partial<ItemInput>, maxPhotos = MAX_ITEM_PHOTOS) {
     const b = await this.ofOrg(ref);
     const item = await this.items.findOne({ _id: itemId, businessId: b._id, archivedAt: null });
     if (!item) throw errors.notFound('Article introuvable.');
@@ -296,7 +319,7 @@ export class CommerceService {
     if (input.detail !== undefined) set.detail = input.detail.trim();
     if (input.price !== undefined) set.price = input.price;
     const photoIds = requestedPhotos(input);
-    if (photoIds !== undefined) set.photos = await this.itemPhotos(by, photoIds, item.photos);
+    if (photoIds !== undefined) set.photos = await this.itemPhotos(by, photoIds, item.photos, maxPhotos);
     if (input.stock !== undefined && b.kind === 'shop') set.stock = input.stock;
     if (input.available !== undefined) set.available = input.available;
     if (input.orderable !== undefined) set.orderable = input.orderable;
@@ -526,8 +549,8 @@ export class CommerceService {
   }
 
   /** Pictures already on the article stay as they are; new uploads must be the editor's. */
-  private async itemPhotos(by: ObjectId, ids: string[], current: ImageRef[]): Promise<ImageRef[]> {
-    if (ids.length > MAX_ITEM_PHOTOS) throw errors.validation(`${MAX_ITEM_PHOTOS} photos au plus.`, { field: 'photoIds' });
+  private async itemPhotos(by: ObjectId, ids: string[], current: ImageRef[], max: number): Promise<ImageRef[]> {
+    if (ids.length > max) throw errors.validation(`${max} photos au plus.`, { field: 'photoIds' });
     const kept = new Map(current.map((p) => [p.mediaId.toHexString(), p]));
     const fresh = ids.filter((id) => !kept.has(id));
     const claimed = fresh.length ? await this.media.claim(by, fresh) : [];
@@ -890,7 +913,7 @@ export class CommerceService {
   private async payOut(o: OrderDoc, by: ObjectId | null) {
     // Cash: the business was paid by hand.
     if (o.method === 'cash') return;
-    const phone = await this.organizations.payoutPhone(o.orgId);
+    const phone = await this.organizations.payoutPhone(o.orgId, o.method);
     if (!phone) return;
     const owner = by ?? (await this.teamOf(o)).find((m) => m.roles.includes('owner'))?.userId;
     if (!owner) return;

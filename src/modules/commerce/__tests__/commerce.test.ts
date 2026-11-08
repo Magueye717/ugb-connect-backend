@@ -420,6 +420,11 @@ describe('référencement', () => {
     expect((await call(shopEditor, 'POST', `/admin/businesses/${b.id}/catalog`, { section: 'menu', name: 'Yassa', price: 1500 })).statusCode).toBe(400);
     expect((await call(restoEditor, 'POST', `/admin/businesses/${b.id}/catalog`, { section: 'article', name: 'Stylo', price: 100 })).statusCode).toBe(403);
     expect((await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { price: 800 }))).price).toBe(800);
+    // Référencement isn't held to the owners' 6 photos per article.
+    const editorId = new ObjectId(String(shopEditor.userId));
+    const many = await Promise.all(Array.from({ length: 8 }, async () => (await t.c.modules.media.service.upload(editorId, 'business', await picture(), 'http://localhost/api/v1'))._id.toHexString()));
+    expect((await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { photoIds: many }))).photoIds).toEqual(many);
+    expect((await ok(call(shopEditor, 'GET', '/reference/commerce'))).editorMaxItemPhotos).toBe(30);
     // 0 stays 0 (sold out), null stays null (no stock count): neither is coerced into the other.
     expect(await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { stock: 0 }))).toMatchObject({ stock: 0, soldOut: true });
     expect((await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { stock: null }))).stock).toBe(null);
@@ -645,5 +650,28 @@ describe('mes ventes', () => {
     expect((await call(owner, 'GET', `/org/${orgId}/${sp}/sales?from=31-10-2026&to=2026-11-01`)).statusCode).toBe(400);
     // Not found for them, like the other managers-only pages.
     expect((await call(staff, 'GET', `/org/${orgId}/${sp}/sales?from=2026-10-31&to=2026-11-01`)).statusCode).toBe(404);
+  });
+});
+
+describe('payout numbers', () => {
+  it('each provider accepted pays out to its own number, which only the owner and Référencement see', async () => {
+    const { b, owner, orgId, admin, sp } = await business('restaurant');
+    const mine = await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { paymentMethods: ['cash', 'wave', 'orange_money'], payoutNumbers: { wave: '77 111 22 33', orange_money: '781112233' } }));
+    expect(mine.payoutNumbers).toEqual({ wave: '+221771112233', orange_money: '+221781112233' });
+    expect((await ok(call(admin, 'GET', `/admin/businesses/${b.id}`))).payoutNumbers).toEqual({ wave: '+221771112233', orange_money: '+221781112233' });
+    // Never in what students get.
+    const s = await registerStudent(t);
+    expect((await ok(call(s, 'GET', `/businesses/${b.id}`))).payoutNumbers).toBeUndefined();
+    // Each order is paid out to the number of the provider it was paid with.
+    expect(await t.c.modules.organizations.payoutPhone(new ObjectId(orgId), 'wave')).toBe('+221771112233');
+    expect(await t.c.modules.organizations.payoutPhone(new ObjectId(orgId), 'orange_money')).toBe('+221781112233');
+    // A number that isn't one: refused, nothing changed.
+    expect((await call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { payoutNumbers: { wave: '12' } })).statusCode).toBe(400);
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/${sp}/business`))).payoutNumbers.wave).toBe('+221771112233');
+    // Taken off: back to the organization's number (the owner's, at creation).
+    const back = await ok(call(admin, 'PATCH', `/admin/businesses/${b.id}`, { payoutNumbers: { orange_money: null } }));
+    expect(back.payoutNumbers.orange_money).toMatch(/^\+221\d{9}$/);
+    expect(back.payoutNumbers.orange_money).not.toBe('+221781112233');
+    expect(back.payoutNumbers.wave).toBe('+221771112233');
   });
 });

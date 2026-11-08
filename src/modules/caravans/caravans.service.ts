@@ -937,7 +937,7 @@ export class CaravansService {
    * organization's payout number. Once per departure.
    */
   async claim(orgId: ObjectId, id: ObjectId, userId: ObjectId, method: PaymentMethod): Promise<PayoutDoc> {
-    const phone = await this.organizations.payoutPhone(orgId);
+    const phone = await this.organizations.payoutPhone(orgId, method);
     if (!phone) throw errors.rule('NO_PAYOUT_ACCOUNT', 'Aucun numéro de paiement pour l’organisation. Demande à l’équipe UGB Connect de l’enregistrer.');
     let payout!: PayoutDoc;
     await withTransaction(this.mongo, async (session) => {

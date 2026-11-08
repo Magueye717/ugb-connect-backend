@@ -3,7 +3,7 @@ import { ObjectId } from 'mongodb';
 import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
 import { CAMPUS_PLACES } from './places.catalog.js';
-import { PLACE_CATEGORIES } from './places.types.js';
+import { PLACE_CATEGORIES, PLACE_MAX_PHOTOS } from './places.types.js';
 
 export const placesCollections: CollectionSpec[] = [
   {
@@ -17,7 +17,7 @@ export const placesCollections: CollectionSpec[] = [
           area: bson.string({ maxLength: 80 }),
           location: bson.object({ lat: { bsonType: ['double', 'int'], minimum: -90, maximum: 90 }, lng: { bsonType: ['double', 'int'], minimum: -180, maximum: 180 } }, ['lat', 'lng']),
           icon: bson.string({ maxLength: 40 }),
-          photos: bson.array(bson.object({ url: bson.string({ maxLength: 500 }) }, ['url', 'mediaId']), { maxItems: 6 }),
+          photos: bson.array(bson.object({ url: bson.string({ maxLength: 500 }) }, ['url', 'mediaId']), { maxItems: PLACE_MAX_PHOTOS }),
           active: bson.bool,
         },
         ['name', 'category', 'description', 'area', 'campus', 'location', 'hours', 'icon', 'photos', 'active', 'sortOrder', 'createdAt', 'updatedAt'],

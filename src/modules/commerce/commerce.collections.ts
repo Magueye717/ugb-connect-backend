@@ -1,6 +1,6 @@
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
 import type { DataMigration } from '../../platform/db/migrations.js';
-import { BUSINESS_KINDS, DELIVERY_ZONES, ITEM_SECTIONS, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ORDER_MODES, ORDER_PAYMENT_METHODS, ORDER_STATUSES } from './commerce.types.js';
+import { BUSINESS_KINDS, DELIVERY_ZONES, EDITOR_MAX_ITEM_PHOTOS, ITEM_SECTIONS, MAX_SPECIALTIES, ORDER_MODES, ORDER_PAYMENT_METHODS, ORDER_STATUSES } from './commerce.types.js';
 
 const fee = bson.nullable(bson.int({ minimum: 0, maximum: 5000 }));
 
@@ -40,7 +40,8 @@ export const commerceCollections: CollectionSpec[] = [
           name: bson.string({ minLength: 2, maxLength: 50 }),
           detail: bson.string({ maxLength: 120 }),
           price: bson.int({ minimum: 0, maximum: 1_000_000 }),
-          photos: bson.array(bson.imageRef, { maxItems: MAX_ITEM_PHOTOS }),
+          // The owners' limit is checked by the API; Référencement may go up to its own.
+          photos: bson.array(bson.imageRef, { maxItems: EDITOR_MAX_ITEM_PHOTOS }),
           stock: bson.nullable(bson.int({ minimum: 0 })),
           available: bson.bool,
           orderable: bson.bool,

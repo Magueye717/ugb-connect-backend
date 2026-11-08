@@ -22,6 +22,9 @@ export type OrgCategory = (typeof ORG_CATEGORIES)[number];
 export type OrgLevel = (typeof ORG_LEVELS)[number];
 export type OrgCapability = (typeof ORG_CAPABILITIES)[number];
 export type OrgRole = (typeof ORG_ROLES)[number];
+/** The providers a payout goes through. */
+export const PAYOUT_PROVIDERS = ['wave', 'orange_money'] as const;
+export type PayoutProvider = (typeof PAYOUT_PROVIDERS)[number];
 export type OrgSpace = (typeof ORG_SPACES)[number];
 
 /** The spaces an organization's capabilities open. Without a restaurant or shop, it organizes (caravans, events). */
@@ -45,6 +48,11 @@ export type OrganizationDoc = {
   status: 'pending' | 'active' | 'suspended';
   /** Where organizer claims are paid (decision Q-2): a Wave / Orange Money number. */
   payoutAccount: { phone: string } | null;
+  /**
+   * One number per provider (a business taking Wave on one phone and Orange Money on another). Paid there for that
+   * provider; `payoutAccount` otherwise (older organizations, caravans).
+   */
+  payoutAccounts?: Partial<Record<PayoutProvider, string>>;
   /** Contact address, given at creation or later (admin or owner). Not unique: one contact may run several organizations. */
   email: string | null;
   /** Logo or profile picture, set through the media module (never a client-supplied URL). */

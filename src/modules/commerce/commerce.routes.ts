@@ -11,7 +11,7 @@ import type { AuditApi } from '../audit/index.js';
 import type { OrganizationsApi, OrgRole } from '../organizations/index.js';
 import { PaymentView, paymentView } from '../payments/index.js';
 import type { BusinessRef, CommerceService } from './commerce.service.js';
-import { BUSINESS_KINDS, DELIVERY_ZONE_LABELS, DELIVERY_ZONES, ITEM_SECTIONS, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ORDER_MODES, ORDER_PAYMENT_LABELS, ORDER_PAYMENT_METHODS, SALES_MAX_DAYS, SPECIALTIES, type BusinessDoc, type BusinessKind } from './commerce.types.js';
+import { BUSINESS_KINDS, DELIVERY_ZONE_LABELS, DELIVERY_ZONES, EDITOR_MAX_ITEM_PHOTOS, ITEM_SECTIONS, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ORDER_MODES, ORDER_PAYMENT_LABELS, ORDER_PAYMENT_METHODS, SALES_MAX_DAYS, SPECIALTIES, type BusinessDoc, type BusinessKind } from './commerce.types.js';
 
 // Null first: the validator would otherwise coerce null to 0 ("free delivery") through the integer branch.
 const Fee = Nullable(Type.Integer({ minimum: 0, maximum: 5000 }));
@@ -67,6 +67,8 @@ const BusinessView = Type.Object({
   onlinePayments: Type.Boolean({ description: 'May take Wave and Orange Money. A student’s shop: false until the team has verified it (cash only).' }),
   itemLikes: Type.Boolean({ description: 'Its items can be liked (shops: yes; restaurants: no heart).' }),
 });
+// What the owner and Référencement see: the public view, plus where each provider's money goes (never shown to students).
+const OwnBusinessView = Type.Object({ ...BusinessView.properties, payoutNumbers: Type.Object({ wave: Nullable(Type.String()), orange_money: Nullable(Type.String()) }) });
 const ListedBusiness = Type.Object({ ...BusinessView.properties, highlights: Type.Array(ItemView), minPrice: Nullable(Type.Number()), itemsCount: Type.Number(), itemNames: Type.Array(Type.String(), { description: 'Every available item: for searching.' }) });
 const BusinessDetail = Type.Object({
   ...BusinessView.properties,
@@ -113,6 +115,12 @@ const ProfileBody = Type.Object(
     deliveryFees: Type.Optional(Type.Object({ campus1: Fee, campus2: Fee, outside: Fee }, { additionalProperties: false })),
     acceptingOrders: Type.Optional(Type.Boolean()),
     paymentMethods: Type.Optional(Type.Array(Type.Enum(ORDER_PAYMENT_METHODS), { minItems: 1, maxItems: ORDER_PAYMENT_METHODS.length })),
+    payoutNumbers: Type.Optional(
+      Type.Object(
+        { wave: Type.Optional(Nullable(Type.String({ maxLength: 20 }))), orange_money: Type.Optional(Nullable(Type.String({ maxLength: 20 }))) },
+        { additionalProperties: false, description: 'Where each provider pays out (required for each one accepted, else 400). Null: back to the organization’s number.' },
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -122,7 +130,7 @@ const ItemFields = {
   name: Type.String({ minLength: 2, maxLength: 50 }),
   detail: Type.Optional(Type.String({ maxLength: 120 })),
   price: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
-  photoIds: Type.Optional(Type.Array(ObjectIdString, { maxItems: MAX_ITEM_PHOTOS, description: `Uploads (purpose business), the cover first; up to ${MAX_ITEM_PHOTOS}. [] removes them all.` })),
+  photoIds: Type.Optional(Type.Array(ObjectIdString, { maxItems: MAX_ITEM_PHOTOS, description: `Uploads (purpose business), the cover first; up to ${MAX_ITEM_PHOTOS} (Référencement: ${EDITOR_MAX_ITEM_PHOTOS}). [] removes them all.` })),
   // Older apps: one picture (same as photoIds: [id], or [] for null).
   photoId: Type.Optional(Nullable(ObjectIdString)),
   stock: Type.Optional(Nullable(Type.Integer({ minimum: 0, maximum: 100_000 }))),
@@ -130,6 +138,8 @@ const ItemFields = {
   orderable: Type.Optional(Type.Boolean({ description: 'Default true. False: shown for information only (printing, on the spot), no stock, never in an order.' })),
   sortOrder: Type.Optional(Type.Number()),
 };
+// Référencement's routes (/admin/businesses/…): the same fields, more photos per article.
+const EditorItemFields = { ...ItemFields, photoIds: Type.Optional(Type.Array(ObjectIdString, { maxItems: EDITOR_MAX_ITEM_PHOTOS, description: `Uploads (purpose business), the cover first; up to ${EDITOR_MAX_ITEM_PHOTOS}. [] removes them all.` })) };
 // A business's own routes name its space: /org/:orgId/restaurant/… or /org/:orgId/shop/… (one entity may run both).
 const OrgParams = Type.Object({ orgId: ObjectIdString, space: Type.Enum(BUSINESS_KINDS) }, { additionalProperties: false });
 const OrgItemParams = Type.Object({ orgId: ObjectIdString, space: Type.Enum(BUSINESS_KINDS), itemId: ObjectIdString }, { additionalProperties: false });
@@ -156,12 +166,13 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
   const trace = (req: FastifyRequest, action: string, type: string, id: string, metadata?: Record<string, unknown>) =>
     audit.record({ actor: { type: 'user', id: actorOf(req).userId }, action, target: { type, id }, requestId: req.id, ...(metadata ? { metadata } : {}) });
   const view = (b: BusinessDoc) => service.publicView(b);
+  const ownView = async (b: BusinessDoc) => ({ ...view(b), payoutNumbers: await service.payoutNumbers(b) });
 
   // The lists the app's pickers show (specialties, delivery zones): one source, here.
   app.get(
     '/reference/commerce',
-    { schema: { tags, response: { 200: Type.Object({ specialties: Type.Object({ restaurant: Type.Array(Type.String()), shop: Type.Array(Type.String()) }), maxSpecialties: Type.Integer(), maxItemPhotos: Type.Integer({ description: 'Photos per article, the cover included.' }), paymentMethods: Type.Array(Type.Object({ value: Type.String(), label: Type.String() })), zones: Type.Array(Type.Object({ value: Type.String(), label: Type.String() })) }) } } },
-    async () => ({ specialties: { restaurant: [...SPECIALTIES.restaurant], shop: [...SPECIALTIES.shop] }, maxSpecialties: MAX_SPECIALTIES, maxItemPhotos: MAX_ITEM_PHOTOS, paymentMethods: ORDER_PAYMENT_METHODS.map((m) => ({ value: m, label: ORDER_PAYMENT_LABELS[m] })), zones: DELIVERY_ZONES.map((z) => ({ value: z, label: DELIVERY_ZONE_LABELS[z] })) }),
+    { schema: { tags, response: { 200: Type.Object({ specialties: Type.Object({ restaurant: Type.Array(Type.String()), shop: Type.Array(Type.String()) }), maxSpecialties: Type.Integer(), maxItemPhotos: Type.Integer({ description: 'Photos per article, the cover included.' }), editorMaxItemPhotos: Type.Integer({ description: 'The same for Référencement (its own routes).' }), paymentMethods: Type.Array(Type.Object({ value: Type.String(), label: Type.String() })), zones: Type.Array(Type.Object({ value: Type.String(), label: Type.String() })) }) } } },
+    async () => ({ specialties: { restaurant: [...SPECIALTIES.restaurant], shop: [...SPECIALTIES.shop] }, maxSpecialties: MAX_SPECIALTIES, maxItemPhotos: MAX_ITEM_PHOTOS, editorMaxItemPhotos: EDITOR_MAX_ITEM_PHOTOS, paymentMethods: ORDER_PAYMENT_METHODS.map((m) => ({ value: m, label: ORDER_PAYMENT_LABELS[m] })), zones: DELIVERY_ZONES.map((z) => ({ value: z, label: DELIVERY_ZONE_LABELS[z] })) }),
   );
 
   // ---- Students -------------------------------------------------------------------------------------------------
@@ -292,15 +303,15 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
     async (req) => ({ items: await service.interestsOf(refOf(req.params)) }),
   );
 
-  app.get('/org/:orgId/:space/business', { ...team, schema: { tags, params: OrgParams, response: { 200: BusinessView } } }, async (req) => view(await service.ofOrg(refOf(req.params))));
+  app.get('/org/:orgId/:space/business', { ...team, schema: { tags, params: OrgParams, response: { 200: OwnBusinessView } } }, async (req) => ownView(await service.ofOrg(refOf(req.params))));
 
   // Pausing orders is the managers' call too; the rest of the profile is the owner's only.
-  app.patch('/org/:orgId/:space/business', { ...managers, schema: { tags, params: OrgParams, description: 'Picture, GPS point, address, hours, delivery prices: the owner. Pause orders: owner or managers.', body: ProfileBody, response: { 200: BusinessView } } }, async (req) => {
+  app.patch('/org/:orgId/:space/business', { ...managers, schema: { tags, params: OrgParams, description: 'Picture, GPS point, address, hours, delivery prices: the owner. Pause orders: owner or managers.', body: ProfileBody, response: { 200: OwnBusinessView } } }, async (req) => {
     const onlyPause = Object.keys(req.body).every((k) => k === 'acceptingOrders');
     if (!onlyPause && !(await roleIn(toObjectId(req.params.orgId), me(req), ['owner'], req.params.space))?.includes('owner')) throw errors.forbidden('Seul le propriétaire modifie les informations du commerce.');
     const b = await service.update(refOf(req.params), me(req), req.body);
     await trace(req, 'business.update', 'business', b._id.toHexString(), { fields: Object.keys(req.body) });
-    return view(b);
+    return ownView(b);
   });
 
   app.get('/org/:orgId/:space/catalog', { ...team, schema: { tags, params: OrgParams, response: { 200: Type.Object({ items: Type.Array(ItemView) }) } } }, async (req) => {
@@ -482,7 +493,7 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
   };
   const AdminItemParams = Type.Object({ id: ObjectIdString, itemId: ObjectIdString }, { additionalProperties: false });
 
-  app.get('/admin/businesses/:id', { ...admin, schema: { tags: ['admin'], params: IdParams, response: { 200: BusinessView } } }, async (req) => view((await editable(req)).b));
+  app.get('/admin/businesses/:id', { ...admin, schema: { tags: ['admin'], params: IdParams, response: { 200: OwnBusinessView } } }, async (req) => ownView((await editable(req)).b));
 
   app.patch(
     '/admin/businesses/:id',
@@ -493,7 +504,7 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
         params: IdParams,
         description: 'The whole profile (name, picture, place, hours, delivery prices), hide or show it again, and open Wave / Orange Money once the team has verified who runs it (`onlinePayments`).',
         body: Type.Object({ ...ProfileBody.properties, active: Type.Optional(Type.Boolean()), onlinePayments: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
-        response: { 200: BusinessView },
+        response: { 200: OwnBusinessView },
       },
     },
     async (req) => {
@@ -504,7 +515,7 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
       let b = Object.keys(profile).length ? await service.update(ref, me(req), profile) : await service.ofOrg(ref);
       if (active !== undefined) b = await service.setActive(b._id, active);
       await trace(req, 'business.update', 'business', b._id.toHexString(), { fields: Object.keys(req.body), by: 'editor' });
-      return view(b);
+      return ownView(b);
     },
   );
 
@@ -515,10 +526,10 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
 
   app.post(
     '/admin/businesses/:id/catalog',
-    { ...admin, schema: { tags: ['admin'], params: IdParams, description: 'Restaurants: menu or drink. Shops: article (with stock).', body: Type.Object(ItemFields, { additionalProperties: false }), response: { 201: ItemView } } },
+    { ...admin, schema: { tags: ['admin'], params: IdParams, description: 'Restaurants: menu or drink. Shops: article (with stock).', body: Type.Object(EditorItemFields, { additionalProperties: false }), response: { 201: ItemView } } },
     async (req, reply) => {
       const { ref } = await editable(req);
-      const item = await service.addItem(ref, me(req), req.body);
+      const item = await service.addItem(ref, me(req), req.body, EDITOR_MAX_ITEM_PHOTOS);
       await trace(req, 'catalog.add', 'catalog_item', item._id.toHexString(), { by: 'editor' });
       return reply.status(201).send(service.itemView(item));
     },
@@ -526,10 +537,10 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
 
   app.patch(
     '/admin/businesses/:id/catalog/:itemId',
-    { ...admin, schema: { tags: ['admin'], params: AdminItemParams, body: Type.Partial(Type.Object(ItemFields, { additionalProperties: false })), response: { 200: ItemView } } },
+    { ...admin, schema: { tags: ['admin'], params: AdminItemParams, body: Type.Partial(Type.Object(EditorItemFields, { additionalProperties: false })), response: { 200: ItemView } } },
     async (req) => {
       const { ref } = await editable(req);
-      return service.itemView(await service.updateItem(ref, me(req), toObjectId(req.params.itemId), req.body));
+      return service.itemView(await service.updateItem(ref, me(req), toObjectId(req.params.itemId), req.body, EDITOR_MAX_ITEM_PHOTOS));
     },
   );
 
