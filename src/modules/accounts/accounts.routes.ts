@@ -49,13 +49,13 @@ export function registerAccountsRoutes(root: FastifyInstance, { service, audit, 
       preHandler: [requireAuth, requireStudent],
       schema: {
         tags: ['me'],
-        description: 'A student without a number gives it (optional at sign-up). Once set it does not change here.',
+        description: 'A student gives their number (optional at sign-up). Correctable for 3 days after it was first given, then it does not change here.',
         body: Type.Object({ studentNumber: Type.String({ minLength: 1, maxLength: 30 }) }, { additionalProperties: false }),
       },
     },
     async (req, reply) => {
       if ((await service.claimStudentNumber(me(req), req.body.studentNumber)) === 'has-other') {
-        throw errors.conflict('STUDENT_NUMBER_SET', 'Ton numéro étudiant est déjà enregistré : il ne se change pas ici. Écris à l’équipe UGB Connect en cas d’erreur.');
+        throw errors.conflict('STUDENT_NUMBER_SET', 'Ton numéro étudiant est enregistré depuis plus de 3 jours : il ne se change plus ici. Écris à l’équipe UGB Connect en cas d’erreur.');
       }
       return reply.status(204).send();
     },

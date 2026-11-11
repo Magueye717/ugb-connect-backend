@@ -1,8 +1,7 @@
 import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
-import { PAYMENT_METHODS } from '../payments/index.js';
 import { BOOKING_STATUSES, EVENT_CATEGORIES, EVENT_STATUSES } from './events.types.js';
-import { TICKET_PAYMENT_METHODS } from '../ticketing/ticketing.types.js';
+import { TICKET_PAYMENT_METHODS } from '../ticketing/index.js';
 
 const ticketType = bson.object(
   {
@@ -67,6 +66,9 @@ export const eventsCollections: CollectionSpec[] = [
       { key: { 'units.unitId': 1 }, options: { name: 'unit_unique', unique: true } },
       { key: { userId: 1, eventId: 1 }, options: { name: 'user_event' } },
       { key: { status: 1, holdExpiresAt: 1 }, options: { name: 'hold_expiry' } },
+      { key: { requestCode: 1 }, options: { name: 'request_code', sparse: true } },
+      // One ticket of a request, by its own code.
+      { key: { 'units.requestCode': 1 }, options: { name: 'unit_request_code', sparse: true } },
     ],
   },
 ];

@@ -12,19 +12,25 @@ import type { NotificationsApi } from '../notifications/index.js';
 import type {
   NewPayout,
   PaymentDoc,
+  MethodStatus,
   PaymentEventDoc,
   PaymentMethod,
+  PaymentSettingsDoc,
   PaymentPurpose,
   PaymentStatus,
   PayoutDoc,
   ProviderId,
   PurposeHandler,
 } from './payments.types.js';
+import { PAYMENT_METHODS } from './payments.types.js';
 import type { PaymentProvider, ProviderEvent } from './providers.js';
 
 export const PAYOUT_QUEUE = 'payments.payout';
 export const PAYMENTS_SWEEP_QUEUE = 'payments.sweep';
 const MAX_PAYOUT_ATTEMPTS = 5;
+/** The switches are read on every payment: kept this long in memory (each API instance), refreshed on change here. */
+const SETTINGS_TTL_MS = 10_000;
+export const METHOD_LABEL: Record<PaymentMethod, string> = { wave: 'Wave', orange_money: 'Orange Money' };
 
 /** Deep links the checkout page may send the student back to: the app's scheme, and Expo Go in development. */
 // The app's link scheme (ugbconnect://); the old one stays accepted for builds installed before the rename.
@@ -70,7 +76,9 @@ export class PaymentsService {
   private readonly payments: Collection<PaymentDoc>;
   private readonly events: Collection<PaymentEventDoc>;
   private readonly payouts: Collection<PayoutDoc>;
+  private readonly settings: Collection<PaymentSettingsDoc>;
   private readonly handlers = new Map<PaymentPurpose, PurposeHandler>();
+  private cached: { at: number; doc: PaymentSettingsDoc | null } | null = null;
 
   constructor(
     db: Db,
@@ -81,7 +89,10 @@ export class PaymentsService {
     private readonly accounts: AccountsApi,
     private readonly providers: Partial<Record<ProviderId, PaymentProvider>>,
     private readonly notifications: NotificationsApi,
+    /** Owners and managers of every active business and organizer: told when a method is switched off or back on. */
+    private readonly teamLeads: () => Promise<ObjectId[]> = async () => [],
   ) {
+    this.settings = db.collection('paymentSettings');
     this.payments = db.collection('payments');
     this.events = db.collection('paymentEvents');
     this.payouts = db.collection('payouts');
@@ -104,9 +115,67 @@ export class PaymentsService {
     return p;
   }
 
-  /** Throws when no provider can take payments, before anything is reserved. */
-  assertAvailable(method: PaymentMethod) {
+  /** Throws when no provider can take payments (or the admins switched this method off), before anything is reserved. */
+  async assertAvailable(method: PaymentMethod) {
     this.providerFor(method);
+    const off = (await this.settingsDoc())?.off[method];
+    if (off) {
+      const other = PAYMENT_METHODS.filter((m) => m !== method).map((m) => METHOD_LABEL[m]).join(' ou ');
+      throw new AppError(503, 'METHOD_OFF', `${METHOD_LABEL[method]} est momentanément désactivé. Paie avec ${other}, ou en espèces quand c’est possible.`, { method });
+    }
+  }
+
+  private async settingsDoc() {
+    const now = Date.now();
+    if (!this.cached || now - this.cached.at > SETTINGS_TTL_MS) this.cached = { at: now, doc: await this.settings.findOne({ _id: 'methods' }) };
+    return this.cached.doc;
+  }
+
+  /** Each method: on, or off since when (shown in the app: banner on the home, greyed choice). */
+  async methods(): Promise<MethodStatus[]> {
+    const off = (await this.settingsDoc())?.off ?? {};
+    return PAYMENT_METHODS.map((method) => ({ method, available: !off[method], offSince: off[method]?.since.toISOString() ?? null, note: off[method]?.note ?? null }));
+  }
+
+  /**
+   * The admins switch a method off (an outage at Wave…) or back on. Off: businesses and organizers are told (their
+   * clients can't pay that way), and so are students whose payment with it is still waiting. Back on: businesses and
+   * organizers again. Everyone else sees the banner on the home.
+   */
+  async setMethod(method: PaymentMethod, enabled: boolean, by: ObjectId, note: string | null) {
+    const now = this.clock.now();
+    const current = (await this.settings.findOne({ _id: 'methods' }))?.off[method];
+    if (!enabled === !!current) return this.methods();
+    const clean = note?.trim().replace(/\s+/g, ' ').slice(0, 200) || null;
+    await this.settings.updateOne(
+      { _id: 'methods' },
+      enabled ? { $unset: { [`off.${method}`]: '' }, $set: { updatedAt: now } } : { $set: { [`off.${method}`]: { since: now, by, note: clean }, updatedAt: now } },
+      { upsert: true },
+    );
+    this.cached = null;
+    const name = METHOD_LABEL[method];
+    const stamp = now.getTime();
+    const leads = await this.teamLeads();
+    if (!enabled) {
+      const waiting = await this.payments.distinct('userId', { method, status: { $in: ['created', 'pending'] }, expiresAt: { $gt: now } });
+      await this.notifications.notify(leads, {
+        type: 'payments.method_off', category: 'paiements', icon: 'alert-circle', tone: 'warning', dedupeKey: `payments.method_off:${method}:${stamp}`,
+        title: `${name} momentanément désactivé`,
+        body: `Tes clients ne peuvent plus payer avec ${name} pour l’instant : les autres moyens et les espèces restent possibles.${clean ? ` ${clean}` : ''}`,
+      });
+      await this.notifications.notify(waiting as ObjectId[], {
+        type: 'payments.method_off_pending', category: 'paiements', icon: 'time', tone: 'warning', dedupeKey: `payments.method_off_pending:${method}:${stamp}`,
+        title: `${name} momentanément désactivé`,
+        body: `Ton paiement ${name} en attente risque de ne pas aboutir. S’il échoue, recommence avec un autre moyen de paiement.`,
+      });
+    } else {
+      await this.notifications.notify(leads, {
+        type: 'payments.method_on', category: 'paiements', icon: 'checkmark-circle', tone: 'success', dedupeKey: `payments.method_on:${method}:${stamp}`,
+        title: `${name} est de retour`,
+        body: `Tes clients peuvent de nouveau payer avec ${name}.`,
+      });
+    }
+    return this.methods();
   }
 
   validateReturnUrl(url: string | null | undefined): string | null {

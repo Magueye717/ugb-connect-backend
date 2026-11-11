@@ -93,8 +93,10 @@ describe('what triggers them', () => {
     await call(o, 'POST', `/org/${orgId}/departures/${draft.id}/publish`);
 
     const buy = async (s: Who) => {
-      const { booking, payment } = json(await call(s, 'POST', `/caravans/departures/${draft.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }));
-      await t.app.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${payment.reference}/pay`, headers: { 'content-type': 'text/plain' }, payload: '' });
+      // A request, then validated by the organizer (paid in cash).
+      const { booking } = json(await call(s, 'POST', `/caravans/departures/${draft.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1' }));
+      const orderId = (await t.c.mongo.db.collection('bookings').findOne({ _id: new ObjectId(booking.id) }))!.orderId.toHexString();
+      await call(o, 'POST', `/org/${orgId}/departures/requests/${orderId}/validate`);
       return json(await call(s, 'GET', `/caravans/bookings/${booking.id}`)).ticketId as string;
     };
     const [a, b, friend] = [await registerStudent(t), await registerStudent(t), await registerStudent(t)];

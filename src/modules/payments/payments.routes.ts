@@ -9,7 +9,7 @@ import { errors } from '../../platform/http/errors.js';
 import { toObjectId } from '../../platform/http/schemas.js';
 import { randomCode } from '../../platform/security/crypto.js';
 import { paymentView, payoutView, type PaymentsService } from './payments.service.js';
-import { PAYOUT_STATUSES } from './payments.types.js';
+import { PAYMENT_METHODS, PAYOUT_STATUSES } from './payments.types.js';
 import { SIMULATOR_SIGNATURE_HEADER, signSimulatorBody, type SimulatedEventType } from './providers.js';
 
 export const PaymentView = Type.Object({
@@ -31,10 +31,32 @@ export const PayoutView = Type.Object({
 const ReferenceParams = Type.Object({ reference: Type.String({ pattern: '^PAY_[0-9A-Z]{20}$' }) }, { additionalProperties: false });
 const SIM_ACTIONS = ['pay', 'fail', 'cancel', 'duplicate'] as const;
 
-type Deps = { service: PaymentsService; config: Config; clock: Clock; requireFinance: preHandlerHookHandler };
+type Deps = { service: PaymentsService; config: Config; clock: Clock; requireFinance: preHandlerHookHandler; requireAdmin: preHandlerHookHandler };
 
-export function registerPaymentsRoutes(root: FastifyInstance, { service, config, clock, requireFinance }: Deps) {
+const MethodStatusView = Type.Object({ method: Type.String(), available: Type.Boolean(), offSince: Type.Union([Type.String(), Type.Null()]), note: Type.Union([Type.String(), Type.Null()]) });
+const MethodsView = Type.Object({ items: Type.Array(MethodStatusView) });
+
+export function registerPaymentsRoutes(root: FastifyInstance, { service, config, clock, requireFinance, requireAdmin }: Deps) {
   const app = root.withTypeProvider<TypeBoxTypeProvider>();
+
+  // Which of Wave / Orange Money take payments right now: a switched-off one is greyed, with a banner on the home.
+  app.get('/payments/methods', { preHandler: requireAuth, schema: { tags: ['payments'], response: { 200: MethodsView } } }, async () => ({ items: await service.methods() }));
+
+  // The admins' switch, app-wide (an outage at the provider). Businesses, organizers and students waiting on a
+  // payment with it are told.
+  app.put(
+    '/admin/payments/methods/:method',
+    {
+      preHandler: [requireAuth, requireAdmin],
+      schema: {
+        tags: ['admin'],
+        params: Type.Object({ method: Type.Enum(PAYMENT_METHODS) }, { additionalProperties: false }),
+        body: Type.Object({ enabled: Type.Boolean(), note: Type.Optional(Type.Union([Type.String({ maxLength: 200 }), Type.Null()])) }, { additionalProperties: false }),
+        response: { 200: MethodsView },
+      },
+    },
+    async (req) => ({ items: await service.setMethod(req.params.method, req.body.enabled, toObjectId(actorOf(req).userId), req.body.note ?? null) }),
+  );
 
   // The app polls this after the checkout page: only the server decides that money arrived.
   app.get(

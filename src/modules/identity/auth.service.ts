@@ -5,7 +5,7 @@ import { withTransaction } from '../../platform/db/mongo.js';
 import { AppError, errors } from '../../platform/http/errors.js';
 import { hashPassword, needsRehash, passwordProblem, verifyPassword } from '../../platform/security/passwords.js';
 import type { Limiter } from '../../platform/security/limiter.js';
-import type { AccountsApi, Campus } from '../accounts/index.js';
+import type { Niveau, AccountsApi, Campus } from '../accounts/index.js';
 import type { AuditApi } from '../audit/index.js';
 import type { OtpService } from './otp.service.js';
 import type { SessionService } from './session.service.js';
@@ -25,6 +25,8 @@ export type RegisterInput = {
   room?: string | null;
   /** UFR code and home region (GET /reference/student). */
   ufr: string;
+  /** Year of study (optional for older apps). */
+  niveau?: string;
   region: string;
   password: string;
   termsVersion: string;
@@ -86,7 +88,7 @@ export class AuthService {
     const user = await withTransaction(this.mongo, async (session) => {
       const { phone } = await this.otp.consume(input.verificationToken, 'register', session);
       return this.accounts.createStudentAccount(
-        { phone, studentNumber, firstName, lastName, campus: input.campus, ...residence, ...origin, passwordHash, termsVersion: input.termsVersion },
+        { phone, studentNumber, firstName, lastName, campus: input.campus, ...residence, ...origin, niveau: (input.niveau ?? null) as Niveau | null, passwordHash, termsVersion: input.termsVersion },
         session,
       );
     });

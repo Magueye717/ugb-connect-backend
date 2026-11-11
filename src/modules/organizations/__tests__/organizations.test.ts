@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { bearer, createStaff, createTestApp, json, nextPhone, registerStudent, type TestApp } from '../../../../test/harness.js';
@@ -151,8 +152,12 @@ describe('Référencement: caravan organizers', () => {
     const res = await call('POST', '/admin/caravan-organizers', tok, { name: 'Ndiambour Voyages', category: 'Transporteur', owner: { phone, firstName: 'Ibrahima', lastName: 'Fall' } });
     expect(res.statusCode).toBe(201);
     const org = json(res);
-    expect(org).toMatchObject({ name: 'Ndiambour Voyages', category: 'Transporteur', capabilities: ['caravans'], level: 'verifie', hasPayoutAccount: true, owner: { firstName: 'Ibrahima', lastName: 'Fall' } });
+    // No badge given: it starts « Nouveau » and earns its badge with the trips.
+    expect(org).toMatchObject({ name: 'Ndiambour Voyages', category: 'Transporteur', capabilities: ['caravans'], level: 'nouveau', levelGiven: 'nouveau', hasPayoutAccount: true, owner: { firstName: 'Ibrahima', lastName: 'Fall' } });
     expect(json(await call('GET', '/admin/caravan-organizers', tok)).items.map((x: { id: string }) => x.id)).toContain(org.id);
+    for (let i = 0; i < 5; i++) await t.c.modules.organizations.countTrip(new ObjectId(org.id));
+    const earned = json(await call('GET', '/admin/caravan-organizers', tok)).items.find((x: { id: string }) => x.id === org.id);
+    expect(earned).toMatchObject({ trips: 5, level: 'verifie', levelGiven: 'nouveau' });
 
     // Same number again: it already runs caravans.
     expect(json(await call('POST', '/admin/caravan-organizers', tok, { name: 'Autre', category: 'Entreprise', owner: { phone } })).code).toBe('ALREADY_ORGANIZER');

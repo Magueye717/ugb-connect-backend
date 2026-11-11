@@ -1,7 +1,7 @@
 import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
 import { PAYMENT_METHODS } from '../payments/index.js';
-import { TICKET_PAYMENT_METHODS } from '../ticketing/ticketing.types.js';
+import { TICKET_PAYMENT_METHODS } from '../ticketing/index.js';
 import { BOOKING_STATUSES, DEFAULT_MAX_SEATS_PER_STUDENT, DEPARTURE_STATUSES, DIRECTIONS, MAX_SEATS_PER_STUDENT } from './caravans.types.js';
 
 const stop = bson.object({ stopId: bson.string({ minLength: 1, maxLength: 20 }), place: bson.string({ minLength: 2, maxLength: 80 }), at: bson.date }, ['stopId', 'place', 'at']);
@@ -89,6 +89,8 @@ export const caravansCollections: CollectionSpec[] = [
       ),
     },
     indexes: [
+      { key: { requestCode: 1 }, options: { name: 'request_code', sparse: true } },
+      { key: { seatCode: 1 }, options: { name: 'seat_code', sparse: true } },
       // Two students can never hold the same seat, whatever the timing.
       { key: { departureId: 1, seat: 1 }, options: { name: 'departure_seat_active_unique', unique: true, partialFilterExpression: { seatActive: true } } },
       // At most maxSeatsPerStudent purchases per student per departure (slots 1..max), still counted after giving a

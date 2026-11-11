@@ -159,6 +159,8 @@ export type NewTicket = {
   passenger: TicketDoc['passenger'];
   /** Default: the holder travels unless there's a passenger. False for the extra tickets of a multi-ticket order. */
   holderTravels?: boolean;
+  /** Cash already handed to the organizer (a request they validated): nothing left to collect at the scan. */
+  cashCollectedAt?: Date | null;
 };
 
 /** Transfers are refused this close to the start (decision Q-4). The kind can set an earlier deadline. */

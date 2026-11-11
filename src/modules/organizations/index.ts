@@ -38,6 +38,8 @@ export type OrganizationsApi = OrganizationsPort & {
   /** Each provider's number (its own, else the organization's): shown to the owner and Référencement only. */
   payoutNumbers(orgId: ObjectId): Promise<Record<PayoutProvider, string | null>>;
   setPayoutNumbers(orgId: ObjectId, numbers: Partial<Record<PayoutProvider, string | null>>): Promise<void>;
+  /** Owners and managers of every active organization: told when a payment method is switched off app-wide. */
+  teamLeadIds(): Promise<ObjectId[]>;
   /** Is the organization active and verified for this (e.g. selling event tickets)? */
   can(orgId: ObjectId, capability: OrgCapability): Promise<boolean>;
   /**
@@ -79,6 +81,7 @@ export function createOrganizationsModule(deps: { db: Db; clock: Clock; accounts
     addCapability: (o, c) => service.addCapability(o, c),
     cards: (ids) => service.cards(ids),
     members: async (orgId, space) => (await deps.db.collection('memberships').find({ orgId, space, status: 'active' }, { projection: { userId: 1, roles: 1 } }).toArray()).map((m) => ({ userId: m.userId, roles: m.roles })),
+    teamLeadIds: () => service.teamLeadIds(),
     payoutPhone: async (orgId, provider) => {
       const o = await service.get(orgId);
       return (provider && o.payoutAccounts?.[provider as PayoutProvider]) || o.payoutAccount?.phone || null;

@@ -134,10 +134,17 @@ describe('menus', () => {
 describe('rupture', () => {
   it('a dish sold out: alert on the home screen until the end of lunch, one push; back in stock clears it', async () => {
     const { staff, resto, menu, day, student } = await setup();
-    t.clock.set(Date.parse(`${day}T12:30:00Z`));
     const th = menu.dishes[2];
-    const before = (await broadcasts()).length;
     const url = `/admin/public-restos/${resto.id}/menus/${day}/lunch/dishes/${th.id}`;
+    // Only the meal being served (from 30 min before it opens): not lunch at 10h, nor while dinner is served.
+    t.clock.set(Date.parse(`${day}T10:00:00Z`));
+    expect(json(await call(staff, 'PATCH', url, { status: 'out' })).code).toBe('MEAL_NOT_SERVING');
+    t.clock.set(Date.parse(`${day}T19:30:00Z`));
+    expect(json(await call(staff, 'PATCH', url, { status: 'out' })).code).toBe('MEAL_NOT_SERVING');
+    t.clock.set(Date.parse(`${day}T11:40:00Z`));
+    await ok(call(staff, 'PATCH', url, { status: 'low' }));
+    t.clock.set(Date.parse(`${day}T12:30:00Z`));
+    const before = (await broadcasts()).length;
     expect((await ok(call(staff, 'PATCH', url, { status: 'out', notify: true }))).dishes[2].status).toBe('out');
     const alerts = (await ok(call(student, 'GET', '/alerts'))).items;
     const a = alerts.find((x: { title: string }) => x.title === `Rupture · Thiébou dieun · ${resto.name}`);

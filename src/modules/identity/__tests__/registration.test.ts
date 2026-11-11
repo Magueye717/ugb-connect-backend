@@ -1,7 +1,7 @@
 import { ObjectId } from 'mongodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createTestApp, json, nextPhone, nextStudentNumber, registerStudent, type TestApp } from '../../../../test/harness.js';
+import { bearer, createTestApp, json, nextPhone, nextStudentNumber, registerStudent, type TestApp } from '../../../../test/harness.js';
 
 let t: TestApp;
 beforeAll(async () => {
@@ -108,7 +108,8 @@ describe('sign-up', () => {
     const long = `P${String(Date.now()).slice(-11)}`;
     expect((await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: long.toLowerCase() }) })).statusCode).toBe(201);
     for (const n of ['P12345', 'P-232-055', 'A2320551', `P${'1'.repeat(12)}`]) {
-      expect(json(await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: n }) })).field, n).toBe('studentNumber');
+      const r = json(await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: n }) }));
+      expect(r.field, `${n} ${JSON.stringify(r)}`).toBe('studentNumber');
     }
     expect(json(await t.app.inject({ url: '/api/v1/reference/student' })).studentNumber).toEqual({ pattern: '^P\\d{6,11}$', maxLength: 12, example: 'P232055' });
   });
@@ -144,6 +145,21 @@ describe('sign-up', () => {
     expect(json(await t.app.inject({ url: '/api/v1/me', headers: auth })).student).toMatchObject({ ufr: 'SJP', region: 'Kolda', originEditableFrom: '2028-10-01T00:00:00.000Z' });
     expect((await t.app.inject({ method: 'PUT', url: '/api/v1/me/origin', headers: auth, payload: { ufr: 'SAT', region: 'Kolda' } })).statusCode).toBe(409);
     t.clock.set(was);
+  });
+
+  it('the niveau is asked with the UFR; each of UFR, niveau and région can be given alone', async () => {
+    const res = await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ niveau: 'Licence 2' }) });
+    expect(res.statusCode).toBe(201);
+    const auth = bearer(json(res).tokens.accessToken);
+    expect(json(await t.app.inject({ url: '/api/v1/me', headers: auth })).student).toMatchObject({ niveau: 'Licence 2' });
+    expect((await t.app.inject({ method: 'PUT', url: '/api/v1/me/origin', headers: auth, payload: { niveau: 'Doctorat' } })).statusCode).toBe(409);
+    expect((await t.app.inject({ method: 'PUT', url: '/api/v1/me/origin', headers: auth, payload: { niveau: 'Bac+9' } })).statusCode).toBe(400);
+    // An older account without a niveau fills it in alone (the rest stays).
+    const old = await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile() });
+    const auth2 = bearer(json(old).tokens.accessToken);
+    expect((await t.app.inject({ method: 'PUT', url: '/api/v1/me/origin', headers: auth2, payload: { niveau: 'Master 1' } })).statusCode).toBe(204);
+    const me = json(await t.app.inject({ url: '/api/v1/me', headers: auth2 })).student;
+    expect(me).toMatchObject({ niveau: 'Master 1', ufr: profile().ufr, region: profile().region });
   });
 
   it('applies the password rules of the app', async () => {

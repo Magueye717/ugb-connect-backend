@@ -311,7 +311,7 @@ export class TaxiService {
     if (target && !this.paid(target)) return { ...(await this.reserve(userId, target)), payment: null };
     if (!input.method) throw errors.validation('Choisis Wave ou Orange Money pour payer ta place.', { field: 'method' });
     const method = input.method;
-    this.payments.assertAvailable(method);
+    await this.payments.assertAvailable(method);
     const returnUrl = this.payments.validateReturnUrl(input.returnUrl);
 
     // A retry (or coming back to pay): the same hold and the same payment, not a second seat.

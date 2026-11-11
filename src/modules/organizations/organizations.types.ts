@@ -5,6 +5,11 @@ import type { ImageRef } from '../../platform/media.js';
 /** `Étudiant`: a student's own organization, created when they first organize an event (reviewed by admins). */
 export const ORG_CATEGORIES = ['Entreprise', 'Amicale', 'Transporteur', 'Restaurant', 'Boutique', 'Étudiant'] as const;
 export const ORG_LEVELS = ['nouveau', 'verifie', 'confirme'] as const;
+/** The badge earned by the trips done: « Vérifié » from 5, « Certifié » from 20 (never below what the team gave). */
+export const TRIPS_FOR_LEVEL = { verifie: 5, confirme: 20 } as const;
+export const earnedLevel = (trips: number): (typeof ORG_LEVELS)[number] => (trips >= TRIPS_FOR_LEVEL.confirme ? 'confirme' : trips >= TRIPS_FOR_LEVEL.verifie ? 'verifie' : 'nouveau');
+/** What students see: the higher of the badge given by the team and the one earned by the trips. */
+export const shownLevel = (given: (typeof ORG_LEVELS)[number], trips: number) => (ORG_LEVELS.indexOf(earnedLevel(trips)) > ORG_LEVELS.indexOf(given) ? earnedLevel(trips) : given);
 /**
  * What the platform verified the organization for: `events` lets it sell tickets for parties, conferences, outings;
  * `restaurant` and `shop` give it a business space (menus or articles, orders paid in the app).

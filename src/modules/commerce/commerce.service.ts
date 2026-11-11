@@ -11,11 +11,12 @@ import type { MediaApi } from '../media/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
 import { PAYOUT_PROVIDERS, type OrganizationsApi, type PayoutProvider } from '../organizations/index.js';
 import type { PaymentMethod, PaymentsApi, PurposeHandler } from '../payments/index.js';
-import { type BusinessDoc, type BusinessKind, type CatalogItemDoc, DEFAULT_PAYMENT_METHODS, type ItemLikeDoc, LIKEABLE_KINDS, DELIVERY_ZONE_LABELS, DELIVERY_ZONES, type DeliveryFees, type DeliveryZone, type ItemSection, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ONLINE_PAYMENT_METHODS, onlinePaymentsAllowed, ORDER_AUTO_COMPLETE_H, ORDER_PAY_WITHIN_MIN, ORDER_PAYMENT_LABELS, ORDER_PAYMENT_METHODS, type OrderDoc, type OrderLine, type OrderMode, type OrderPaymentMethod, type OrderStatus, SALES_MAX_DAYS, SALES_TOP_ITEMS, type Service, SPECIALTIES } from './commerce.types.js';
+import { type BusinessDoc, type BusinessKind, type CatalogItemDoc, DEFAULT_PAYMENT_METHODS, type ItemLikeDoc, NO_SHOW_BLOCK_D, NO_SHOW_LIMIT, NO_SHOW_WINDOW_D, LIKEABLE_KINDS, DELIVERY_ZONE_LABELS, DELIVERY_ZONES, type DeliveryFees, type DeliveryZone, type ItemSection, isoDay, MAX_ITEM_PHOTOS, MAX_SPECIALTIES, ONLINE_PAYMENT_METHODS, onlinePaymentsAllowed, ORDER_AUTO_COMPLETE_H, ORDER_PAY_WITHIN_MIN, ORDER_PAYMENT_LABELS, ORDER_PAYMENT_METHODS, type OrderDoc, type OrderLine, type OrderMode, type OrderPaymentMethod, type OrderStatus, SALES_MAX_DAYS, SALES_TOP_ITEMS, servedOn, type Service, SPECIALTIES } from './commerce.types.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
+const dakar = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Dakar', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fcfa = (n: number) => `${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} FCFA`;
 const localPhone = (e164: string) => e164.replace(/^\+221/, '').replace(/^(\d{2})(\d{3})(\d{2})(\d{2})$/, '$1 $2 $3 $4');
 const minutes = (hhmm: string) => {
@@ -23,6 +24,8 @@ const minutes = (hhmm: string) => {
   return h! * 60 + m!;
 };
 /** "13:00" → "13h", "19:30" → "19h30". */
+/** « Ouvert 24h/24 » (a shop): one service from midnight to midnight. */
+const allDay = (services: Service[]) => services.length === 1 && services[0]!.start === '00:00' && services[0]!.end === '24:00';
 const hourLabel = (hhmm: string) => hhmm.replace(/^0/, '').replace(':00', 'h').replace(':', 'h');
 /** Where to see a new order (business space) and to follow mine (student). */
 const BUSINESS_ORDER_URL = (id: ObjectId) => `/commande-recue/${id.toHexString()}`;
@@ -57,6 +60,16 @@ export type ItemInput = {
   /** The cover first. `photoId`: older apps, one picture. */
   photoIds?: string[]; photoId?: string | null;
   stock?: number | null; available?: boolean; orderable?: boolean; sortOrder?: number;
+  /** A restaurant's weekly menu: 1 (lundi) to 7 (dimanche); null: every day. */
+  days?: number[] | null;
+};
+
+/** The days of a dish, sorted; every day (or none given) is null. */
+const cleanDays = (days: number[] | null | undefined) => {
+  if (!days) return null;
+  const set = [...new Set(days)].sort((a, b) => a - b);
+  if (!set.length) throw errors.validation('Choisis au moins un jour, ou « tous les jours ».', { field: 'days' });
+  return set.length === 7 ? null : set;
 };
 
 /** The pictures asked for, `photoIds` or the older `photoId`; undefined: not changed. */
@@ -201,13 +214,9 @@ export class CommerceService {
     return this.businesses.find({}).sort({ kind: 1, name: 1 }).toArray();
   }
 
-  /** At least one, in the usual order; Wave and Orange Money only once the business may take them. */
-  private checkMethods(asked: OrderPaymentMethod[], b: Pick<BusinessDoc, 'onlinePayments' | 'byStudent'>) {
-    const methods = ORDER_PAYMENT_METHODS.filter((m) => asked.includes(m));
-    if (!methods.length) throw errors.validation('Accepte au moins un moyen de paiement.', { field: 'paymentMethods' });
-    if (!onlinePaymentsAllowed(b) && methods.some((m) => ONLINE_PAYMENT_METHODS.includes(m)))
-      throw errors.rule('ONLINE_PAYMENTS_LOCKED', 'Wave et Orange Money s’ouvrent quand l’équipe UGB Connect a vérifié ta boutique : contacte-la. En attendant, les espèces.');
-    return methods;
+  /** Cash only, whatever is asked: orders are paid at the delivery or the counter (Wave / Orange Money are UGB Connect's). */
+  private checkMethods(_asked: OrderPaymentMethod[], _b: Pick<BusinessDoc, 'onlinePayments' | 'byStudent'>): OrderPaymentMethod[] {
+    return ['cash'];
   }
 
   /**
@@ -302,6 +311,7 @@ export class CommerceService {
       _id: new ObjectId(), businessId: b._id, section: input.section, category: input.category?.trim() || null, name: input.name.trim(), detail: input.detail?.trim() ?? '', price: input.price,
       photos: await this.itemPhotos(by, requestedPhotos(input) ?? [], [], maxPhotos), stock: b.kind === 'shop' && orderable ? (input.stock ?? null) : null, available: input.available ?? true, orderable,
       likes: 0, sortOrder: input.sortOrder ?? now.getTime(), archivedAt: null, createdAt: now, updatedAt: now,
+      ...(b.kind === 'restaurant' ? { days: cleanDays(input.days) } : {}),
     };
     await this.items.insertOne(doc);
     return doc;
@@ -323,6 +333,7 @@ export class CommerceService {
     if (input.stock !== undefined && b.kind === 'shop') set.stock = input.stock;
     if (input.available !== undefined) set.available = input.available;
     if (input.orderable !== undefined) set.orderable = input.orderable;
+    if (input.days !== undefined && b.kind === 'restaurant') set.days = cleanDays(input.days);
     // For information only: nothing to count.
     if ((set.orderable ?? item.orderable) === false) set.stock = null;
     if (input.sortOrder !== undefined) set.sortOrder = input.sortOrder;
@@ -351,7 +362,9 @@ export class CommerceService {
     const label = !b.acceptingOrders
       ? 'Commandes en pause'
       : current
-        ? `Ouvert · jusqu’à ${hourLabel(current.end)}`
+        ? allDay(b.services)
+          ? 'Ouvert 24h/24'
+          : `Ouvert · jusqu’à ${hourLabel(current.end)}`
         : next
           ? `Fermé · ${m < minutes(next.start) ? 'ouvre' : 'demain'} à ${hourLabel(next.start)}`
           : 'Fermé';
@@ -360,7 +373,7 @@ export class CommerceService {
 
   async list(kind: BusinessKind, viewer: ObjectId) {
     const docs = await this.businesses.find({ kind, active: true }).sort({ name: 1 }).toArray();
-    const items = docs.length ? await this.items.find({ businessId: { $in: docs.map((d) => d._id) }, archivedAt: null, available: true }).sort({ sortOrder: 1 }).toArray() : [];
+    const items = docs.length ? await this.items.find({ businessId: { $in: docs.map((d) => d._id) }, archivedAt: null, available: true, ...servedOn(isoDay(this.clock.now())) }).sort({ sortOrder: 1 }).toArray() : [];
     const [liked, interested] = await Promise.all([this.likedBy(viewer, items), this.interestedBy(viewer, items)]);
     return docs
       .map((b) => {
@@ -400,7 +413,8 @@ export class CommerceService {
   async detail(id: ObjectId, viewer: ObjectId) {
     const b = await this.businesses.findOne({ _id: id, active: true });
     if (!b) throw errors.notFound('Commerce introuvable.');
-    const items = await this.items.find({ businessId: b._id, archivedAt: null, available: true }).sort({ section: 1, sortOrder: 1 }).toArray();
+    // A restaurant's weekly menu: today's dishes only.
+    const items = await this.items.find({ businessId: b._id, archivedAt: null, available: true, ...servedOn(isoDay(this.clock.now())) }).sort({ section: 1, sortOrder: 1 }).toArray();
     const [liked, interested] = await Promise.all([this.likedBy(viewer, items), this.interestedBy(viewer, items)]);
     return { ...this.publicView(b), items: items.map((i) => this.itemView(i, liked, interested)) };
   }
@@ -521,7 +535,7 @@ export class CommerceService {
       campusLabel: b.campus ? CAMPUS_LABELS[b.campus] : null,
       phone: b.phone,
       services: b.services,
-      hours: b.services.map((s) => `${hourLabel(s.start)}-${hourLabel(s.end)}`).join(' · '),
+      hours: allDay(b.services) ? '24h/24' : b.services.map((s) => `${hourLabel(s.start)}-${hourLabel(s.end)}`).join(' · '),
       open: st.open,
       statusLabel: st.label,
       deliveryFees: b.deliveryFees,
@@ -543,7 +557,7 @@ export class CommerceService {
     return {
       id: i._id.toHexString(), section: i.section, category: i.category, name: i.name, detail: i.detail, price: i.price,
       photo: i.photos[0]?.url ?? null, photos: i.photos.map((p) => p.url), photoIds: i.photos.map((p) => p.mediaId.toHexString()),
-      stock: i.stock, soldOut: i.stock !== null && i.stock <= 0, available: i.available, orderable: i.orderable,
+      stock: i.stock, soldOut: i.stock !== null && i.stock <= 0, available: i.available, orderable: i.orderable, days: i.days ?? null,
       likes: i.likes ?? 0, liked: !!liked?.has(i._id.toHexString()), interested: !!interested?.has(i._id.toHexString()), createdAt: i.createdAt.toISOString(),
     };
   }
@@ -560,13 +574,19 @@ export class CommerceService {
   // ---- Students: ordering -----------------------------------------------------------------------------------------
 
   /**
-   * One order to one business, paid now (Wave / Orange Money). Shops' stock is taken here (a conditional update per
-   * article: two students never get the last one) and given back if the order isn't paid, is refused or cancelled.
+   * One order to one business, paid in cash at the delivery or the counter. Shops' stock is taken here (a conditional
+   * update per article: two students never get the last one) and given back if the order is refused or cancelled.
+   * A student absent too often (« Client absent ») can't order for a while.
    */
   async place(userId: ObjectId, businessId: ObjectId, input: { lines: { itemId: string; qty: number }[]; mode: OrderMode; zone?: DeliveryZone | null; address?: string | null; note?: string | null; method: OrderPaymentMethod; returnUrl?: string | null }, baseUrl: string) {
     await this.limiter.hit(`order:${userId.toHexString()}`, { limit: 20, windowS: 3600 });
+    if (input.method !== 'cash') throw errors.validation('Les commandes se paient en espèces, à la livraison ou au retrait. Mets à jour l’app.', { field: 'method' });
+    const blockedUntil = await this.noShowBlock(userId);
+    if (blockedUntil) {
+      throw errors.rule('NO_SHOW_BLOCKED', `Absent à ${NO_SHOW_LIMIT} commandes ce mois-ci : tu pourras recommander le ${dakar.format(blockedUntil)}.`, { until: blockedUntil.toISOString() });
+    }
     const cash = input.method === 'cash';
-    if (!cash) this.payments.assertAvailable(input.method as PaymentMethod);
+    if (!cash) await this.payments.assertAvailable(input.method as PaymentMethod);
     const returnUrl = cash ? null : this.payments.validateReturnUrl(input.returnUrl);
     const b = await this.businesses.findOne({ _id: businessId, active: true });
     if (!b) throw errors.notFound('Commerce introuvable.');
@@ -589,6 +609,7 @@ export class CommerceService {
     const lines: OrderLine[] = wanted.map((l) => {
       const item = items.find((i) => i._id.toHexString() === l.itemId);
       if (!item || !item.available) throw errors.conflict('ITEM_UNAVAILABLE', `${item?.name ?? 'Un article'} n’est plus disponible : retire-le de ton panier.`);
+      if (item.days && !item.days.includes(isoDay(this.clock.now()))) throw errors.conflict('ITEM_UNAVAILABLE', `${item.name} n’est pas au menu aujourd’hui : retire-le de ton panier.`);
       if (!item.orderable) throw errors.rule('ITEM_NOT_ORDERABLE', `${item.name} se fait sur place : il ne se commande pas.`);
       return { itemId: item._id, name: item.name, price: item.price, qty: l.qty };
     });
@@ -745,6 +766,51 @@ export class CommerceService {
       order = { ...o, refundPayoutId: payout._id };
     });
     await this.payments.schedulePayouts(payoutIds);
+    return order;
+  }
+
+  /** Blocked until when, after NO_SHOW_LIMIT absences within NO_SHOW_WINDOW_D (null: free to order). */
+  async noShowBlock(userId: ObjectId) {
+    const now = this.clock.now();
+    const recent = await this.orders.find({ userId, noShowAt: { $gt: new Date(now.getTime() - NO_SHOW_WINDOW_D * DAY) } }, { projection: { noShowAt: 1 } }).sort({ noShowAt: -1 }).limit(NO_SHOW_LIMIT).toArray();
+    if (recent.length < NO_SHOW_LIMIT) return null;
+    const until = new Date(recent[0]!.noShowAt!.getTime() + NO_SHOW_BLOCK_D * DAY);
+    return until > now ? until : null;
+  }
+
+  /**
+   * « Client absent »: the student never came to the counter, or wasn't there at the delivery. The order is cancelled
+   * (a shop's articles go back in stock), the student is told and it counts: NO_SHOW_LIMIT within NO_SHOW_WINDOW_D
+   * and they can't order for NO_SHOW_BLOCK_D.
+   */
+  async noShow(ref: BusinessRef, id: ObjectId, by: ObjectId) {
+    const { _id: businessId } = await this.ofOrg(ref);
+    const now = this.clock.now();
+    let order!: OrderDoc;
+    await withTransaction(this.mongo, async (session) => {
+      const o = await this.orders.findOneAndUpdate(
+        { _id: id, businessId, status: { $in: ['accepted', 'ready'] } },
+        { $set: { status: 'cancelled', refusal: 'Client absent', noShowAt: now, updatedAt: now }, $push: { history: { status: 'cancelled', at: now, by } } },
+        { session, returnDocument: 'after' },
+      );
+      if (!o) {
+        if (!(await this.orders.findOne({ _id: id, businessId }, { session }))) throw errors.notFound('Commande introuvable.');
+        throw errors.conflict('ORDER_STEP', 'Seule une commande acceptée ou prête peut être marquée « client absent ».');
+      }
+      await this.giveBackStock(o, session);
+      order = o;
+    });
+    const b = await this.businesses.findOne({ _id: businessId });
+    const count = await this.orders.countDocuments({ userId: order.userId, noShowAt: { $gt: new Date(now.getTime() - NO_SHOW_WINDOW_D * DAY) } });
+    const blocked = await this.noShowBlock(order.userId);
+    await this.notifications.notify([order.userId], {
+      type: 'commerce.order_no_show', category: 'paiements', icon: 'alert-circle-outline', tone: 'danger', url: MY_ORDER_URL(order._id),
+      dedupeKey: `order:${order._id.toHexString()}:no_show`,
+      title: `Commande annulée · client absent · ${b?.name ?? ''}`.trim(),
+      body: blocked
+        ? `${NO_SHOW_LIMIT} absences en ${NO_SHOW_WINDOW_D} jours : tu pourras recommander le ${dakar.format(blocked)}.`
+        : `Avertissement ${Math.min(count, NO_SHOW_LIMIT)}/${NO_SHOW_LIMIT} : à ${NO_SHOW_LIMIT} absences en ${NO_SHOW_WINDOW_D} jours, tu ne pourras plus commander pendant ${NO_SHOW_BLOCK_D} jours.`,
+    });
     return order;
   }
 
@@ -968,6 +1034,7 @@ export class CommerceService {
           address: o.address,
           note: o.note,
           refusal: o.refusal,
+          noShow: !!o.noShowAt,
           refunded: !!o.refundPayoutId,
           method: o.method,
           methodLabel: ORDER_PAYMENT_LABELS[o.method],

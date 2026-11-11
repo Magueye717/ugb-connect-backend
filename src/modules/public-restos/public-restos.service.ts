@@ -20,6 +20,9 @@ export const localDate = (d: Date) => dakarDay.format(d);
 /** "2026-11-02" + "15:00" → the instant. Dakar is UTC+0 all year (no daylight saving). */
 const instant = (date: string, hm: string) => new Date(`${date}T${hm}:00.000Z`);
 const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(instant(s, '00:00').getTime());
+/** The kitchen knows a dish is short a little before opening: stock changes start this long before the service. */
+export const STOCK_EARLY_MIN = 30;
+const hourLabel = (hm: string) => hm.replace(':00', 'h').replace(':', 'h');
 
 const dishView = (d: Dish) => ({ id: d.dishId, name: d.name, detail: d.detail, status: d.status, statusAt: d.statusAt.toISOString() });
 export const menuView = (m: PublicMenuDoc) => ({ id: m._id.toHexString(), restoId: m.restoId.toHexString(), date: m.date, meal: m.meal, dishes: m.dishes.map(dishView), updatedAt: m.updatedAt.toISOString() });
@@ -186,6 +189,7 @@ export class PublicRestosService {
   async setDishStatus(restoId: ObjectId, date: string, meal: Meal, dishId: string, status: DishStatus, by: ObjectId, notify = false) {
     const resto = await this.resto(restoId);
     const now = this.clock.now();
+    this.assertServing(resto, date, meal, now);
     const before = await this.menus.findOneAndUpdate(
       { restoId, date, meal, 'dishes.dishId': dishId },
       { $set: { 'dishes.$[d].status': status, 'dishes.$[d].statusAt': now, updatedBy: by, updatedAt: now } },
@@ -198,6 +202,27 @@ export class PublicRestosService {
     if (status === 'out' && was.status !== 'out') await this.soldOut(resto, menu, dish, notify);
     if (status !== 'out' && was.status === 'out') await this.alerts.clear(this.alertKey(menu, dishId));
     return menu;
+  }
+
+  /**
+   * Stock and alerts belong to the meal being served: today's, from a little before it opens until it closes. No
+   * « épuisé » on lunch while dinner is being served, nor on a meal still to come.
+   */
+  private assertServing(resto: PublicRestoDoc, date: string, meal: Meal, now: Date) {
+    const service = resto.services[meal];
+    const from = new Date(instant(date, service.start).getTime() - STOCK_EARLY_MIN * 60_000);
+    const to = instant(date, service.end);
+    if (now >= from && now <= to) return;
+    const when = `de ${hourLabel(service.start)} à ${hourLabel(service.end)}`;
+    throw errors.rule(
+      'MEAL_NOT_SERVING',
+      date !== localDate(now)
+        ? `Le stock se change le jour même, pendant le ${MEAL_LABELS[meal]} (${when}).`
+        : now < from
+          ? `Le ${MEAL_LABELS[meal]} n’a pas commencé : le stock se change ${when} (dès ${STOCK_EARLY_MIN} min avant).`
+          : `Le ${MEAL_LABELS[meal]} est terminé (${when}).`,
+      { from: from.toISOString(), to: to.toISOString() },
+    );
   }
 
   private alertKey(menu: PublicMenuDoc, dishId: string) {

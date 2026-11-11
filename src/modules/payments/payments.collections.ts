@@ -79,4 +79,6 @@ export const paymentsCollections: CollectionSpec[] = [
       { key: { beneficiaryUserId: 1, createdAt: -1 }, options: { name: 'beneficiary_recent' } },
     ],
   },
+  // The admins' Wave / Orange Money switches: a single document.
+  { name: 'paymentSettings', indexes: [] },
 ];

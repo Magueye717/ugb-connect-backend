@@ -15,7 +15,7 @@ const EnvSchema = Type.Object({
   LOG_LEVEL: Type.String({ default: 'info' }),
   // "Aide & support" in the app: who students call, message or write to.
   SUPPORT_PHONE: Type.String({ default: '777902880' }),
-  SUPPORT_EMAIL: Type.String({ default: 'ugb.campus@gmail.com' }),
+  SUPPORT_EMAIL: Type.String({ default: 'magueye.gueye.dev@gmail.com' }),
   /**
    * The first administrator, created by the deploy's migrate step when no account uses this phone (never changed
    * afterwards: an existing account keeps its password and roles). Both empty: nothing is created.

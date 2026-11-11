@@ -17,10 +17,10 @@ import { PlatformTeam, registerTeamRoutes } from './accounts.team.js';
 import type { OrganizationsPort, PlatformRole } from './accounts.types.js';
 
 export type { StudentCard } from './accounts.service.js';
-export type { Audience, AudienceProfile, Campus, NewStudentAccount, OrganizationsPort, MembershipSummary, PlatformRole, Region, UfrCode, UserDoc } from './accounts.types.js';
-export { CAMPUS_LABELS, CAMPUSES, PLATFORM_ROLE_LABELS, PLATFORM_ROLES, REGIONS, STUDENT_NUMBER_MAX, STUDENT_NUMBER_RE, UFR_CODES, UFRS, VILLAGES } from './accounts.types.js';
+export type { Audience, AudienceProfile, Campus, NewStudentAccount, OrganizationsPort, MembershipSummary, Niveau, PlatformRole, Region, UfrCode, UserDoc } from './accounts.types.js';
+export { CAMPUS_LABELS, CAMPUSES, NIVEAUX, PLATFORM_ROLE_LABELS, PLATFORM_ROLES, REGIONS, STUDENT_NUMBER_MAX, STUDENT_NUMBER_RE, UFR_CODES, UFRS, VILLAGES } from './accounts.types.js';
 export type { StudentProfileInput } from './accounts.service.js';
-export { CampusSchema, RegionInput, UfrInput } from './accounts.schemas.js';
+export { CampusSchema, NiveauInput, RegionInput, UfrInput } from './accounts.schemas.js';
 export { accountsCollections, accountsMigrations };
 
 /** Public surface of the accounts module. Other modules get this object, never the repository. */

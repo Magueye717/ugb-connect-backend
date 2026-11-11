@@ -73,7 +73,8 @@ export const BOOKING_STATUSES = ['held', 'confirmed', 'cancelled', 'expired'] as
 export type EventBookingStatus = (typeof BOOKING_STATUSES)[number];
 
 /** One ticket of an order: its id is the ticket's `source`, so each ticket is issued once. */
-export type BookingUnit = { unitId: ObjectId; typeId: string; name: string; price: number; status: EventBookingStatus; ticketId: ObjectId | null };
+/** `requestCode`: one ticket of a request, its own code (UGBREQ:…): paid and validated on its own, or with the others. */
+export type BookingUnit = { unitId: ObjectId; typeId: string; name: string; price: number; status: EventBookingStatus; ticketId: ObjectId | null; requestCode?: string };
 
 /** An order: one or more tickets, one payment (none for a free event). Places are held 10 minutes while paying. */
 export type EventBookingDoc = {
@@ -88,11 +89,22 @@ export type EventBookingDoc = {
   paymentId: ObjectId | null;
   /** Ordered by the organizing team: every ticket is one to give (none for them). */
   forFriends?: boolean;
+  /**
+   * Ordered for a friend by the organizer (by the friend's phone): the booking is the friend's, who pays it from
+   * their own app before `holdExpiresAt` (no payment until they do). Cash or free: issued to them at once.
+   */
+  orderedBy?: ObjectId;
+  /** A request's code: shown as a QR code (UGBREQ:…) to the organizer, who scans it or types it to validate. */
+  requestCode?: string;
   createdAt: Date;
   updatedAt: Date;
 };
 
 export const HOLD_MIN = 10;
+/** A request waits this long for its organizer to validate it (cash received), never past the start. */
+export const REQUEST_H = 24;
+/** Requests waiting at once, per student (one per event). */
+export const MAX_PENDING_REQUESTS = 3;
 /** Free cancellation until 24 h before the start, then 10 % (same rule as the caravans). */
 export const FREE_CANCEL_MS = 24 * 60 * 60 * 1000;
 export const LATE_CANCEL_FEE = 0.1;

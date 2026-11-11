@@ -33,6 +33,7 @@ const ItemView = Type.Object({
   soldOut: Type.Boolean(),
   available: Type.Boolean(),
   orderable: Type.Boolean({ description: 'False: for information only (a service done on the spot), never in an order.' }),
+  days: Nullable(Type.Array(Type.Integer(), { description: 'A restaurant’s weekly menu: 1 (lundi) to 7 (dimanche); null: every day. Students only get today’s.' })),
   likes: Type.Integer({ description: 'Students who like it.' }),
   liked: Type.Boolean({ description: 'The caller likes it (always false in the business’s own catalog).' }),
   createdAt: Type.String({ description: 'When it was added: the market lists the newest first.' }),
@@ -93,6 +94,7 @@ const OrderView = Type.Object({
   address: Nullable(Type.String()),
   note: Nullable(Type.String()),
   refusal: Nullable(Type.String()),
+  noShow: Type.Boolean({ description: 'Cancelled because the student never came (« Client absent »).' }),
   refunded: Type.Boolean(),
   method: Type.String({ description: 'cash | wave | orange_money' }),
   methodLabel: Type.String(),
@@ -136,6 +138,7 @@ const ItemFields = {
   stock: Type.Optional(Nullable(Type.Integer({ minimum: 0, maximum: 100_000 }))),
   available: Type.Optional(Type.Boolean()),
   orderable: Type.Optional(Type.Boolean({ description: 'Default true. False: shown for information only (printing, on the spot), no stock, never in an order.' })),
+  days: Type.Optional(Nullable(Type.Array(Type.Integer({ minimum: 1, maximum: 7 }), { maxItems: 7, description: 'Restaurants: the days it’s on the menu, 1 (lundi) to 7 (dimanche). null: every day.' }))),
   sortOrder: Type.Optional(Type.Number()),
 };
 // Référencement's routes (/admin/businesses/…): the same fields, more photos per article.
@@ -413,6 +416,16 @@ export function registerCommerceRoutes(root: FastifyInstance, { service, audit, 
     async (req) => {
       await service.refuse(refOf(req.params), toObjectId(req.params.id), me(req), req.body.reason);
       await trace(req, 'order.refuse', 'order', req.params.id, { reason: req.body.reason });
+      return service.businessOrder(refOf(req.params), toObjectId(req.params.id));
+    },
+  );
+
+  app.post(
+    '/org/:orgId/:space/orders/:id/no-show',
+    { ...team, schema: { tags, params: OrgOrderParams, description: 'An accepted or ready order the student never came for (« Client absent »): cancelled, counted against them.', response: { 200: OrderView } } },
+    async (req) => {
+      await service.noShow(refOf(req.params), toObjectId(req.params.id), me(req));
+      await trace(req, 'order.no_show', 'order', req.params.id);
       return service.businessOrder(refOf(req.params), toObjectId(req.params.id));
     },
   );

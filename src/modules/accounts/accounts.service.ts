@@ -7,8 +7,8 @@ import { normalizeEmail } from '../../platform/email.js';
 import { normalizePhone, maskPhone } from '../../platform/phone.js';
 import { hashPassword, passwordProblem } from '../../platform/security/passwords.js';
 import type { AccountsRepository } from './accounts.repository.js';
-import {
-  CAMPUSES, NAME_RE, REGIONS, ROLE_SPACES, ROOM_RE, STUDENT_NUMBER_RE, UFR_CODES, VILLAGES,
+import { NIVEAUX,
+  CAMPUSES, EDIT_WINDOW_DAYS, NAME_RE, REGIONS, ROLE_SPACES, ROOM_RE, STUDENT_NUMBER_RE, UFR_CODES, VILLAGES,
   type AppSpace, type Audience, type AudienceProfile, type Campus, type MembershipSummary, type Region, type UfrCode, type NewStudentAccount, type NotificationPrefs, type OrganizationsPort, type PlatformRole, type StudentProfileDoc, type UserDoc,
 } from './accounts.types.js';
 
@@ -172,6 +172,7 @@ export class AccountsService {
       _id: this.repo.newId(),
       userId,
       studentNumber: input.studentNumber,
+      studentNumberSetAt: input.studentNumber ? now : null,
       campus: input.campus,
       onCampus: input.onCampus,
       village: input.village,
@@ -180,7 +181,7 @@ export class AccountsService {
       region: input.region,
       originSetAt: input.ufr || input.region ? now : null,
       filiere: null,
-      niveau: null,
+      niveau: input.niveau ?? null,
       academicGroupIds: [],
       verification: { status: 'unverified', verifiedAt: null },
       createdAt: now,
@@ -299,6 +300,9 @@ export class AccountsService {
     const spaces: AppSpace[] = [];
     if (profile) spaces.push({ key: 'student', type: 'student', kind: null, orgId: null, name: 'Étudiant', roles: [], logoUrl: null, personal: false });
     for (const m of memberships) {
+      // A student's own events are managed from the student space (« Mes événements », its scanner): no organizer space.
+      // The membership stays: it lets them scan and validate their events' tickets.
+      if (m.space === 'organizer' && m.category === 'Étudiant') continue;
       const kind = m.space === 'organizer' ? null : m.space;
       spaces.push({ key: `${m.space}:${m.orgId}`, type: kind ? 'business' : 'organizer', kind, orgId: m.orgId, name: m.name, roles: m.roles, logoUrl: m.logoUrl, personal: m.category === 'Étudiant' });
     }
@@ -348,6 +352,9 @@ export class AccountsService {
             // Until the next rentrée, what's filled stays (null: free to change).
             originEditableFrom: this.lockedUntil(profile.ufr || profile.region ? (profile.originSetAt ?? profile.createdAt) : null, this.clock.now())?.toISOString() ?? null,
             identityEditableFrom: this.lockedUntil(profile.identity?.source === 'card' ? profile.identity.updatedAt : null, this.clock.now())?.toISOString() ?? null,
+            // Typed by the student: correctable until then (null: locked, or nothing typed).
+            studentNumberEditableUntil: this.editableUntil(profile.studentNumber ? (profile.studentNumberSetAt ?? profile.createdAt) : null, this.clock.now())?.toISOString() ?? null,
+            identityEditableUntil: this.editableUntil(profile.identity?.source === 'manual' ? (profile.identity.firstSetAt ?? profile.identity.updatedAt) : null, this.clock.now())?.toISOString() ?? null,
           }
         : null,
       spaces,
@@ -378,31 +385,55 @@ export class AccountsService {
   }
 
   /** "Mon UFR et ma région" in the profile (students who signed up before they were asked, or who changed UFR). */
-  async updateOrigin(userId: ObjectId, input: { ufr: string; region: string }) {
+  /** UFR, région, niveau: each may come alone (what isn't sent stays). */
+  async updateOrigin(userId: ObjectId, input: { ufr?: string; region?: string; niveau?: string }) {
     const profile = await this.repo.findProfileByUserId(userId);
     if (!profile) throw errors.forbidden('Réservé aux étudiants.');
     const now = this.clock.now();
-    const next = this.origin(input);
+    const merged = { ufr: input.ufr ?? profile.ufr, region: input.region ?? profile.region };
+    if (input.ufr !== undefined && !(UFR_CODES as string[]).includes(input.ufr)) throw errors.validation('Choisis ton UFR.', { field: 'ufr' });
+    if (input.region !== undefined && !(REGIONS as readonly string[]).includes(input.region)) throw errors.validation('Choisis ta région d’origine.', { field: 'region' });
+    if (input.niveau !== undefined && !(NIVEAUX as readonly string[]).includes(input.niveau)) throw errors.validation('Choisis ton niveau.', { field: 'niveau' });
     // Given this year: a filled field stays until the rentrée; an empty one can still be filled.
     const until = this.lockedUntil(profile.originSetAt ?? profile.createdAt, now);
-    if (until && ((profile.ufr && profile.ufr !== next.ufr) || (profile.region && profile.region !== next.region))) {
-      throw errors.conflict('ORIGIN_LOCKED', `Ton UFR et ta région se changent une fois par an : modifiables à la rentrée, le ${AccountsService.frDate.format(until)}.`, { editableFrom: until.toISOString() });
+    const changes = (was: string | null | undefined, next: string | undefined) => next !== undefined && !!was && was !== next;
+    if (until && (changes(profile.ufr, input.ufr) || changes(profile.region, input.region) || changes(profile.niveau, input.niveau))) {
+      throw errors.conflict('ORIGIN_LOCKED', `Ton UFR, ton niveau et ta région se changent une fois par an : modifiables à la rentrée, le ${AccountsService.frDate.format(until)}.`, { editableFrom: until.toISOString() });
     }
-    await this.repo.updateProfile(userId, { ...next, originSetAt: now }, now);
+    await this.repo.updateProfile(
+      userId,
+      { ufr: merged.ufr as UfrCode | null, region: merged.region as Region | null, ...(input.niveau !== undefined ? { niveau: input.niveau } : {}), originSetAt: now },
+      now,
+    );
   }
 
   /** The student's own card was just read and its number is theirs: they may save their identity for a while. */
+  /** Until when what was first given at `since` can still be corrected by the student (null: no longer). */
+  private editableUntil(since: Date | null | undefined, now: Date) {
+    if (!since) return null;
+    const until = new Date(since.getTime() + EDIT_WINDOW_DAYS * 24 * 3_600_000);
+    return now < until ? until : null;
+  }
+
   /**
-   * A student without a number gives theirs (on the profile, or from their own card read by the camera). Once set it
-   * doesn't change here (a typo is fixed by the UGB Connect team): `has-other` when the profile already has another.
+   * A student gives their number (on « Ma carte étudiant », typed or read from their own card). Correctable for
+   * EDIT_WINDOW_DAYS after it was first given (a typo); then it doesn't change here (the UGB Connect team fixes it):
+   * `has-other` when the profile already has another, locked.
    */
   async claimStudentNumber(userId: ObjectId, input: string): Promise<'set' | 'has-other'> {
     const number = this.normalizeStudentNumber(input);
     const profile = await this.repo.findProfileByUserId(userId);
     if (!profile) throw errors.forbidden('Réservé aux étudiants.');
-    if (profile.studentNumber) return profile.studentNumber === number ? 'set' : 'has-other';
+    const now = this.clock.now();
+    if (profile.studentNumber === number) return 'set';
+    const since = profile.studentNumber ? (profile.studentNumberSetAt ?? profile.createdAt) : null;
+    if (profile.studentNumber && !this.editableUntil(since, now)) return 'has-other';
     try {
-      await this.repo.profiles.updateOne({ _id: profile._id, studentNumber: null }, { $set: { studentNumber: number, updatedAt: this.clock.now() } });
+      const res = await this.repo.profiles.updateOne(
+        { _id: profile._id, studentNumber: profile.studentNumber },
+        { $set: { studentNumber: number, studentNumberSetAt: since ?? now, updatedAt: now } },
+      );
+      if (!res.matchedCount) return 'has-other';
     } catch (err) {
       if (isDuplicateKey(err, 'student_number_unique_when_set')) throw errors.conflict('STUDENT_NUMBER_TAKEN', 'Ce numéro étudiant est déjà utilisé par un autre compte. Écris à l’équipe UGB Connect si c’est le tien.');
       throw err;
@@ -422,6 +453,7 @@ export class AccountsService {
     const profile = await this.repo.findProfileByUserId(userId);
     if (!profile) throw errors.forbidden('Réservé aux étudiants.');
     const now = this.clock.now();
+    if (!input.fromCard) return this.typedIdentity(profile, input, now);
     // Saved from the card this year: a filled field stays until the rentrée (new card); an empty one can be filled.
     const saved = profile.identity?.source === 'card' ? profile.identity : null;
     const until = this.lockedUntil(saved?.updatedAt, now);
@@ -447,6 +479,36 @@ export class AccountsService {
       { identity: { birthDate: input.birthDate, birthPlace: clean(input.birthPlace), nationality: clean(input.nationality), source: 'card', updatedAt: now }, cardReadAt: null },
       now,
     );
+  }
+
+  /**
+   * Typed by hand (no card at hand): saved without a scan, correctable for EDIT_WINDOW_DAYS after it was first given,
+   * then locked. Never over details read from the card this year; a scan may always replace typed ones.
+   */
+  private async typedIdentity(profile: StudentProfileDoc, input: { birthDate: string | null; birthPlace: string | null; nationality: string | null }, now: Date) {
+    const fromCard = profile.identity?.source === 'card' ? this.lockedUntil(profile.identity.updatedAt, now) : null;
+    if (fromCard) throw errors.conflict('IDENTITY_LOCKED', `Enregistré depuis ta carte cette année : modifiable à la rentrée, le ${AccountsService.frDate.format(fromCard)}.`, { editableFrom: fromCard.toISOString() });
+    const typed = profile.identity?.source === 'manual' ? profile.identity : null;
+    const firstSetAt = typed ? (typed.firstSetAt ?? typed.updatedAt) : now;
+    if (typed && !this.editableUntil(firstSetAt, now)) {
+      throw errors.conflict('IDENTITY_LOCKED', `Rempli à la main il y a plus de ${EDIT_WINDOW_DAYS} jours : scanne ta carte étudiant pour le mettre à jour.`);
+    }
+    this.checkBirthDate(input.birthDate, now);
+    const clean = (v: string | null) => v?.trim().replace(/\s+/g, ' ') || null;
+    await this.repo.updateProfile(
+      profile.userId,
+      { identity: { birthDate: input.birthDate, birthPlace: clean(input.birthPlace), nationality: clean(input.nationality), source: 'manual', updatedAt: now, firstSetAt } },
+      now,
+    );
+  }
+
+  private checkBirthDate(birthDate: string | null, now: Date) {
+    if (!birthDate) return;
+    const d = new Date(`${birthDate}T00:00:00Z`);
+    const age = (now.getTime() - d.getTime()) / (365.25 * 24 * 3_600_000);
+    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== birthDate || age < 14 || age > 80) {
+      throw errors.validation('Date de naissance invalide.', { field: 'birthDate' });
+    }
   }
 
   /** What announcements are matched on for this account (null: not a student, whole-university items only). */

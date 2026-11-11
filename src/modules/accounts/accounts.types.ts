@@ -2,6 +2,9 @@ import type { ObjectId } from 'mongodb';
 
 import type { ImageRef } from '../../platform/media.js';
 
+/** What a student typed themselves (student number, card details by hand) can be corrected this long, then it's locked. */
+export const EDIT_WINDOW_DAYS = 3;
+
 /**
  * The app creator's team. Only `admin` (the super admin) gives these roles. content_editor: alerts, "À la une",
  * paid banners · resto_u_staff: the public restaurants' menus (only the restaurants assigned to them) ·
@@ -65,6 +68,10 @@ export const REGIONS = [
 ] as const;
 export type Region = (typeof REGIONS)[number];
 
+/** The year of study, asked with the UFR (it changes at each rentrée). */
+export const NIVEAUX = ['Licence 1', 'Licence 2', 'Licence 3', 'Master 1', 'Master 2', 'Doctorat'] as const;
+export type Niveau = (typeof NIVEAUX)[number];
+
 /**
  * Who an announcement is for. Each list narrows (empty: no restriction); all empty: the whole university.
  * Lists combine: UFR SAT + Campus 1 = SAT students living on Campus 1.
@@ -121,6 +128,8 @@ export type StudentProfileDoc = {
    * against a registry (decision Q-6).
    */
   studentNumber: string | null;
+  /** When it was first given (sign-up, profile, card): correctable for EDIT_WINDOW_DAYS, then the team's call. Missing: `createdAt`. */
+  studentNumberSetAt?: Date | null;
   campus: Campus;
   onCampus: boolean;
   village: string | null;
@@ -137,7 +146,7 @@ export type StudentProfileDoc = {
    * Birth date ("2002-03-12"), place of birth and nationality: optional, given by the student, best read from their
    * own student card (`source: 'card'`). Missing on older profiles.
    */
-  identity?: { birthDate: string | null; birthPlace: string | null; nationality: string | null; source: 'card' | 'manual'; updatedAt: Date } | null;
+  identity?: { birthDate: string | null; birthPlace: string | null; nationality: string | null; source: 'card' | 'manual'; updatedAt: Date; /** Typed by hand: when first given (correctable EDIT_WINDOW_DAYS). */ firstSetAt?: Date } | null;
   /** When the student's own card was last read and matched their student number: saving the identity needs a recent one. */
   cardReadAt?: Date | null;
   academicGroupIds: ObjectId[];
@@ -157,6 +166,7 @@ export type NewStudentAccount = {
   room: string | null;
   ufr: UfrCode | null;
   region: Region | null;
+  niveau?: Niveau | null;
   passwordHash: string;
   termsVersion: string;
 };

@@ -12,7 +12,7 @@ import { ORG_CAPABILITIES, ORG_CATEGORIES, ORG_LEVELS, ORG_ROLES, ORG_SPACES, ty
 
 const OrgView = Type.Object({
   id: Type.String(), slug: Type.String(), name: Type.String(), category: Type.String(), capabilities: Type.Array(Type.String()),
-  level: Type.String(), rating: Type.Union([Type.Number(), Type.Null()]), trips: Type.Number(), status: Type.String(), hasPayoutAccount: Type.Boolean(),
+  level: Type.String({ description: 'Shown: the badge given by the team or earned by the trips (5: verifie, 20: confirme), the higher.' }), levelGiven: Type.String({ description: 'What the team set (nouveau: let the trips decide).' }), rating: Type.Union([Type.Number(), Type.Null()]), trips: Type.Number(), status: Type.String(), hasPayoutAccount: Type.Boolean(),
   email: Type.Union([Type.String(), Type.Null()]), logoUrl: Type.Union([Type.String(), Type.Null()]),
 });
 const EmailInput = Type.String({ minLength: 3, maxLength: 254 });

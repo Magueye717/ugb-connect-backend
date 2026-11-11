@@ -9,17 +9,17 @@ import type { Limiter } from '../../platform/security/limiter.js';
 import type { AccountsApi } from '../accounts/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
 import type { OrgCard, OrganizationsApi } from '../organizations/index.js';
-import { PAYMENT_METHODS, type PaymentMethod, type PaymentsApi, type PayoutDoc, type PurposeHandler } from '../payments/index.js';
-import { TICKET_PAYMENT_LABELS, type TicketPaymentMethod } from '../ticketing/index.js';
+import { type PaymentMethod, type PaymentsApi, type PayoutDoc, type PurposeHandler } from '../payments/index.js';
+import { type TicketPaymentMethod } from '../ticketing/index.js';
 import type { TicketingApi, TicketKindHandler } from '../ticketing/index.js';
 import {
   BOARDING_GRACE_MS,
   BOARDING_OPENS_MS,
-  BOOKING_CLOSE_MIN,
   FIRST_ROW_SEATS,
   DEFAULT_MAX_SEATS_PER_STUDENT,
   FREE_CANCEL_MS,
-  HOLD_MIN,
+  MAX_PENDING_REQUESTS,
+  REQUEST_H,
   LATE_CANCEL_FEE,
   TRANSFER_CUTOFF_MS,
   type BookingDoc,
@@ -74,7 +74,17 @@ export type NewDeparture = {
 };
 
 /** One seat in a booking request: for the student (no passenger) or for a companion. Seat omitted: picked by the server. */
-export type SeatRequest = { seat?: number; passenger?: { name: string; phone: string } };
+/** A seat: mine or a companion's, who may board and get off at other stops than mine. */
+export type SeatRequest = { seat?: number; passenger?: { name: string; phone: string }; pickupStopId?: string; dropoffStopId?: string };
+
+/**
+ * Sales stay open until the departure itself (a student may book up to the last minute); the minimum is checked 24 h
+ * before, or at the departure for one sooner than that. Never already past, or the worker would cancel it at once.
+ */
+export function deadlines(departureAt: Date, now: Date) {
+  const day = new Date(departureAt.getTime() - 24 * HOUR);
+  return { bookingClosesAt: departureAt, confirmBy: day > now ? day : departureAt };
+}
 
 export class CaravansService {
   private readonly vehicles: Collection<VehicleDoc>;
@@ -145,8 +155,14 @@ export class CaravansService {
           myBooking: lead
             ? {
                 id: lead._id.toHexString(), seat: lead.seat, holdExpiresAt: lead.holdExpiresAt.toISOString(),
-                seats: held.map((b) => ({ seat: b.seat, passenger: b.passenger ? { name: b.passenger.name, phone: localPhone(b.passenger.phone) } : null })),
+                // Each seat waiting, its own code: paid one by one, or all together (the request's code).
+                seats: held.map((b) => ({ id: b._id.toHexString(), seat: b.seat, price: b.price, code: b.seatCode ?? null, passenger: b.passenger ? { name: b.passenger.name, phone: localPhone(b.passenger.phone) } : null })),
                 payment: payment ? { reference: payment.reference, checkoutUrl: payment.checkoutUrl } : null,
+                // A request: paid to the organizer in cash, then validated by them (before holdExpiresAt).
+                awaitingValidation: !lead.paymentId,
+                code: lead.requestCode ?? null,
+                organizer: !lead.paymentId ? await this.organizerContact(d.orgId) : null,
+                total: held.reduce((n, b) => n + b.price, 0),
               }
             : null,
         };
@@ -168,7 +184,8 @@ export class CaravansService {
       dropoffs: d.dropoffs.map(stopView),
       price: d.price,
       maxSeatsPerStudent: d.maxSeatsPerStudent,
-      paymentMethods: d.paymentMethods ?? [...PAYMENT_METHODS],
+      // Seats are paid to the organizer in cash (then validated by them).
+      paymentMethods: ['cash'] as TicketPaymentMethod[],
       totalSeats: sellable(d.vehicle),
       seatsFree: Math.max(0, sellable(d.vehicle) - d.seatsTaken),
       seatsBooked: d.seatsConfirmed,
@@ -203,43 +220,44 @@ export class CaravansService {
   // ---- Student: book and pay -----------------------------------------------------------------------------------
 
   /**
-   * Holds the seats for 10 minutes and opens one payment for all of them: the student's own seat and/or seats for
-   * companions (name + phone, no account needed), up to the departure's limit per student. The unique indexes
-   * decide, not the counters: two students can't hold the same seat, a student can't go over the limit, and can't
-   * hold two seats for themselves.
+   * A request: the seats (the student's own and/or companions', name + phone, no account needed) are held for
+   * REQUEST_H (never past the departure) while the student pays the organizer in cash, in person; the organizer then
+   * validates it (the tickets are issued, valid and scannable) or refuses it. Not validated in time: cancelled, the
+   * seats go back on sale. Nothing is paid in the app. The unique indexes decide, not the counters: two students
+   * can't hold the same seat, a student can't go over the limit, and can't hold two seats for themselves.
    */
   async book(
     userId: ObjectId,
     departureId: ObjectId,
-    input: { seat?: number; seats?: SeatRequest[]; pickupStopId: string; dropoffStopId: string; method: TicketPaymentMethod; returnUrl?: string | null },
-    baseUrl: string,
+    input: { seat?: number; seats?: SeatRequest[]; pickupStopId: string; dropoffStopId: string; method?: TicketPaymentMethod; returnUrl?: string | null },
+    _baseUrl?: string,
   ) {
     await this.limiter.hit(`caravan-book:${userId.toHexString()}`, { limit: 20, windowS: 3600 });
-    // Cash: nothing to pay here, the seats are booked at once and paid at boarding.
-    const cash = input.method === 'cash';
-    if (!cash) this.payments.assertAvailable(input.method as PaymentMethod);
-    const returnUrl = this.payments.validateReturnUrl(input.returnUrl);
     const d = await this.get(departureId);
-    const accepted = d.paymentMethods ?? [...PAYMENT_METHODS];
-    if (!accepted.includes(input.method)) throw errors.validation(`Ce départ n’accepte pas ${TICKET_PAYMENT_LABELS[input.method]}.`, { field: 'method' });
     const now = this.clock.now();
     if (!(d.status === 'published' || d.status === 'confirmed') || now >= d.bookingClosesAt) {
       throw errors.conflict('BOOKING_CLOSED', 'Les réservations sont fermées pour ce départ.');
     }
-    const pickup = d.pickups.find((s) => s.stopId === input.pickupStopId);
-    const dropoff = d.dropoffs.find((s) => s.stopId === input.dropoffStopId);
-    if (!pickup || !dropoff || dropoff.at <= pickup.at) throw errors.validation('Choisis une montée et une descente de ce trajet.', { field: 'pickupStopId' });
+    const stopsOf = (pickupStopId: string, dropoffStopId: string) => {
+      const pickup = d.pickups.find((s) => s.stopId === pickupStopId);
+      const dropoff = d.dropoffs.find((s) => s.stopId === dropoffStopId);
+      if (!pickup || !dropoff || dropoff.at <= pickup.at) throw errors.validation('Choisis une montée et un arrêt de ce trajet.', { field: 'pickupStopId' });
+      return { pickup, dropoff };
+    };
+    const { pickup, dropoff } = stopsOf(input.pickupStopId, input.dropoffStopId);
+    // A companion's own path, when they board or get off elsewhere.
+    const pathOf = (r: SeatRequest) => (r.pickupStopId || r.dropoffStopId ? stopsOf(r.pickupStopId ?? pickup.stopId, r.dropoffStopId ?? dropoff.stopId) : { pickup, dropoff });
 
-    // Coming back to pay: the same hold, the same payment.
-    const held = await this.bookings.find({ departureId, userId, status: 'held' }).sort({ slot: 1 }).toArray();
-    if (held[0]?.paymentId) {
-      const payment = await this.payments.findById(held[0].paymentId);
-      if (payment && (payment.status === 'created' || payment.status === 'pending')) {
-        return { booking: held[0], payment: await this.payments.openCheckout(payment, baseUrl), replay: true };
-      }
+    // One request at a time per departure, and a few at most across departures (nobody blocks seats for nothing).
+    if (await this.bookings.findOne({ departureId, userId, status: 'held' })) {
+      throw errors.conflict('REQUEST_PENDING', 'Tu as déjà une demande en attente pour ce départ : va payer l’organisateur, ou annule-la.');
+    }
+    if ((await this.bookings.distinct('orderId', { userId, status: 'held', holdExpiresAt: { $gt: now } })).length >= MAX_PENDING_REQUESTS) {
+      throw errors.rule('TOO_MANY_REQUESTS', `${MAX_PENDING_REQUESTS} demandes en attente au plus : fais valider ou annule une demande d’abord.`);
     }
 
-    const wanted = await this.seatRequests(d, userId, input.seats ?? [{ seat: input.seat }]);
+    const requests = input.seats ?? [{ seat: input.seat }];
+    const wanted = (await this.seatRequests(d, userId, requests)).map((w) => ({ ...w, path: pathOf(w.request) }));
     const max = d.maxSeatsPerStudent;
     const tooMany = (used: number) =>
       errors.conflict(
@@ -250,7 +268,7 @@ export class CaravansService {
       );
     if (wanted.length > max) throw tooMany(0);
     const explicit = wanted.every((w) => w.seat !== undefined);
-    const holdExpiresAt = new Date(Math.min(now.getTime() + HOLD_MIN * MIN, d.bookingClosesAt.getTime()));
+    const holdExpiresAt = new Date(Math.min(now.getTime() + REQUEST_H * HOUR, d.departureAt.getTime()));
 
     for (let attempt = 0; attempt < 5; attempt++) {
       const used = new Set((await this.bookings.find({ departureId, userId, countsForLimit: true }, { projection: { slot: 1 } }).toArray()).map((b) => b.slot));
@@ -270,28 +288,19 @@ export class CaravansService {
           );
           if (!counted.modifiedCount) throw errors.conflict('NO_SEATS_LEFT', wanted.length > 1 ? 'Plus assez de places libres sur ce départ.' : 'Ce départ est complet.');
           const orderId = new ObjectId();
-          const payment = cash
-            ? null
-            : await this.payments.create(
-                {
-                  userId, purpose: 'caravan_booking', purposeRef: orderId, amount: d.price * wanted.length, method: input.method as PaymentMethod,
-                  description: `Caravane ${d.from} → ${d.to} · ${seats.length > 1 ? `places ${seats.join(', ')}` : `place ${seats[0]}`}`, expiresAt: holdExpiresAt, returnUrl,
-                },
-                session,
-              );
+          const requestCode = randomCode(6);
           const docs: BookingDoc[] = wanted.map((w, i) => ({
-            _id: new ObjectId(), departureId, userId, orderId, slot: slots[i]!, passenger: w.passenger, forSelf: !w.passenger, seat: seats[i]!,
-            pickupStopId: pickup.stopId, dropoffStopId: dropoff.stopId, price: d.price, method: input.method,
-            status: 'held', seatActive: true, countsForLimit: true, holdExpiresAt, paymentId: payment?._id ?? null, ticketId: null, createdAt: now, updatedAt: now,
+            _id: new ObjectId(), departureId, userId, orderId, requestCode, seatCode: randomCode(6), slot: slots[i]!, passenger: w.passenger, forSelf: !w.passenger, seat: seats[i]!,
+            pickupStopId: w.path.pickup.stopId, dropoffStopId: w.path.dropoff.stopId, price: d.price, method: 'cash',
+            status: 'held', seatActive: true, countsForLimit: true, holdExpiresAt, paymentId: null, ticketId: null, createdAt: now, updatedAt: now,
           }));
           await this.bookings.insertMany(docs, { session });
-          // Cash: the tickets are issued now (to pay at boarding).
-          if (!payment && (await this.confirm(docs, 'cash', session)) !== 'fulfilled') throw errors.conflict('ALREADY_BOOKED', 'Tu as déjà ta place sur ce départ.');
-          return { booking: docs[0]!, payment };
+          afterCommit(session, () => this.tellOrganizers(d, docs));
+          return { booking: docs[0]! };
         });
-        return { booking: created.booking, payment: created.payment ? await this.payments.openCheckout(created.payment, baseUrl) : null, replay: false };
+        return { booking: created.booking, payment: null, replay: false };
       } catch (err) {
-        if (isDuplicateKey(err, 'departure_user_self_held_unique')) throw errors.conflict('ALREADY_BOOKED', 'Tu es déjà en train de payer ta place pour ce départ.');
+        if (isDuplicateKey(err, 'departure_user_self_held_unique')) throw errors.conflict('REQUEST_PENDING', 'Tu as déjà une demande en attente pour ce départ.');
         // Another purchase of mine took the slot a moment ago: count again.
         if (isDuplicateKey(err, 'departure_user_slot_unique')) continue;
         if (!isDuplicateKey(err, 'departure_seat_active_unique')) throw err;
@@ -306,7 +315,7 @@ export class CaravansService {
    * Checks what the student asked for: at most one seat for themselves (and only if they have none), each companion
    * named with a phone that isn't theirs, nor already travelling on this departure.
    */
-  private async seatRequests(d: DepartureDoc, userId: ObjectId, list: SeatRequest[]): Promise<{ seat?: number; passenger: Passenger | null }[]> {
+  private async seatRequests(d: DepartureDoc, userId: ObjectId, list: SeatRequest[]): Promise<{ seat?: number; passenger: Passenger | null; request: SeatRequest }[]> {
     if (!list.length) throw errors.validation('Choisis au moins une place.', { field: 'seats' });
     const chosen = list.flatMap((r) => (r.seat !== undefined ? [r.seat] : []));
     if (new Set(chosen).size !== chosen.length) throw errors.validation('La même place est choisie deux fois.', { field: 'seats' });
@@ -320,10 +329,10 @@ export class CaravansService {
     }
     const me = await this.accounts.findById(userId);
     const phones = new Set<string>();
-    const out: { seat?: number; passenger: Passenger | null }[] = [];
+    const out: { seat?: number; passenger: Passenger | null; request: SeatRequest }[] = [];
     for (const r of list) {
       if (!r.passenger) {
-        out.push({ seat: r.seat, passenger: null });
+        out.push({ seat: r.seat, passenger: null, request: { seat: r.seat } });
         continue;
       }
       const name = r.passenger.name.trim().replace(/\s+/g, ' ');
@@ -333,7 +342,7 @@ export class CaravansService {
       if (phones.has(phone)) throw errors.validation('Chaque accompagnant a son propre numéro.', { field: 'passenger.phone' });
       if (await this.ticketing.isTravelling(d._id, phone)) throw errors.conflict('PASSENGER_HAS_SEAT', 'Ce numéro a déjà une place sur ce départ.');
       phones.add(phone);
-      out.push({ seat: r.seat, passenger: { name, phone } });
+      out.push({ seat: r.seat, passenger: { name, phone }, request: r });
     }
     // The student's own seat first: it's the one the booking is shown by.
     return out.sort((a, b) => Number(!!a.passenger) - Number(!!b.passenger));
@@ -376,6 +385,135 @@ export class CaravansService {
       if (res.modifiedCount) await this.departures.updateOne({ _id: b.departureId }, { $inc: { seatsTaken: -res.modifiedCount }, $set: { updatedAt: now } }, { session });
       if (b.paymentId) await this.payments.cancelInSession(b.paymentId, session);
     });
+  }
+
+  // ---- Requests: the organizer validates (cash received) or refuses, within 24 h ---------------------------------
+
+  /** Who to pay and call about a request: the organization's owner (name and phone), shown to the requester only. */
+  private async organizerContact(orgId: ObjectId) {
+    const owner = (await this.organizations.members(orgId, 'organizer')).find((m) => m.roles.includes('owner'));
+    if (!owner) return null;
+    const c = (await this.accounts.contactsByIds([owner.userId])).get(owner.userId.toHexString());
+    return c ? { name: `${c.firstName} ${c.lastName}`, phone: c.phone } : null;
+  }
+
+  /** A new request: the organizer's team (owner, managers, scanners) hears of it. */
+  private async tellOrganizers(d: DepartureDoc, order: BookingDoc[]) {
+    const team = await this.organizations.members(d.orgId, 'organizer');
+    const who = (await this.accounts.namesByIds([order[0]!.userId])).get(order[0]!.userId.toHexString());
+    const n = order.length;
+    await this.notifications.notify(
+      team.map((m) => m.userId),
+      {
+        type: 'caravan.request', category: 'paiements', icon: 'hourglass-outline', tone: 'warning', url: `/depart/${d._id.toHexString()}?vue=demandes`,
+        dedupeKey: `caravan-order:${order[0]!.orderId.toHexString()}:requested`,
+        title: `Demande · ${n} place${n > 1 ? 's' : ''} · ${d.from} → ${d.to}`,
+        body: `${who ? `${who.firstName} ${who.lastName}` : 'Un étudiant'} vient te payer ${d.price * n} F en espèces. Valide sa demande avant le ${dakar.format(order[0]!.holdExpiresAt)}.`,
+      },
+    );
+  }
+
+  private async requestOf(orgId: ObjectId, orderId: ObjectId) {
+    const order = await this.bookings.find({ orderId, status: 'held' }).sort({ slot: 1 }).toArray();
+    const d = order.length ? await this.departures.findOne({ _id: order[0]!.departureId, orgId }) : null;
+    if (!order.length || !d) throw errors.notFound('Demande introuvable, déjà validée ou annulée.');
+    return { order, d };
+  }
+
+  /** The organizer received the cash: the seats' tickets are issued (valid, scannable, nothing left to collect). */
+  async validateRequest(orgId: ObjectId, orderId: ObjectId, bookingIds?: string[]) {
+    const { order: waiting, d } = await this.requestOf(orgId, orderId);
+    // Some seats only (paid one by one): the others keep waiting, until the same deadline.
+    if (bookingIds?.length && bookingIds.some((id) => !waiting.some((b) => b._id.toHexString() === id))) {
+      throw errors.conflict('SEAT_NOT_WAITING', 'Une de ces places n’est plus en attente : déjà validée ou annulée.');
+    }
+    const order = bookingIds?.length ? waiting.filter((b) => bookingIds.includes(b._id.toHexString())) : waiting;
+    const now = this.clock.now();
+    if (order[0]!.holdExpiresAt <= now) throw errors.conflict('REQUEST_EXPIRED', 'Cette demande a expiré : les places sont reparties en vente.');
+    if (!(d.status === 'published' || d.status === 'confirmed')) throw errors.conflict('DEPARTURE_LOCKED', 'Ce départ n’accepte plus de passagers.');
+    const done = await withTransaction(this.mongo, (session) => this.confirm(order, 'cash', session, now));
+    if (done !== 'fulfilled') {
+      await this.endRequest(waiting, 'cancelled');
+      throw errors.conflict('ALREADY_BOOKED', 'L’étudiant a déjà une place sur ce départ : la demande est annulée.');
+    }
+    // What's left of the request (seats still waiting), or the whole order once every seat is validated.
+    const left = await this.bookings.find({ orderId, status: 'held' }).sort({ slot: 1 }).toArray();
+    return this.requestView(left.length ? left : await this.bookings.find({ orderId }).sort({ slot: 1 }).toArray(), d);
+  }
+
+  /** Not paid (or not wanted): the request is cancelled, the seats go back on sale, the student is told why. */
+  async refuseRequest(orgId: ObjectId, orderId: ObjectId, reason: string | null) {
+    const { order, d } = await this.requestOf(orgId, orderId);
+    await this.endRequest(order, 'cancelled');
+    await this.notifications.notify([order[0]!.userId], {
+      type: 'caravan.request_refused', category: 'paiements', icon: 'close-circle-outline', tone: 'danger', url: `/caravane/${d._id.toHexString()}`,
+      dedupeKey: `caravan-order:${orderId.toHexString()}:refused`,
+      title: `Demande refusée · ${d.from} → ${d.to}`,
+      body: reason?.trim() ? reason.trim().slice(0, 200) : 'L’organisateur n’a pas validé ta demande. Les places sont reparties en vente.',
+    });
+  }
+
+  /** Releases a whole request (refused, expired): its seats go back on sale. */
+  private async endRequest(order: BookingDoc[], status: 'cancelled' | 'expired') {
+    await withTransaction(this.mongo, async (session) => {
+      const now = this.clock.now();
+      const res = await this.bookings.updateMany(
+        { orderId: order[0]!.orderId, status: 'held' },
+        { $set: { status, seatActive: false, countsForLimit: false, updatedAt: now } },
+        { session },
+      );
+      if (res.modifiedCount) await this.departures.updateOne({ _id: order[0]!.departureId }, { $inc: { seatsTaken: -res.modifiedCount }, $set: { updatedAt: now } }, { session });
+      if (order[0]!.paymentId) await this.payments.cancelInSession(order[0]!.paymentId, session);
+    });
+  }
+
+  /** The requests waiting for a departure, the soonest to expire first: who, which seats and stops, how much. */
+  async requests(orgId: ObjectId, departureId: ObjectId) {
+    const d = await this.ownDeparture(orgId, departureId);
+    const held = await this.bookings.find({ departureId, status: 'held', holdExpiresAt: { $gt: this.clock.now() } }).sort({ holdExpiresAt: 1, slot: 1 }).toArray();
+    const orders = [...new Map(held.map((b) => [b.orderId.toHexString(), held.filter((x) => x.orderId.equals(b.orderId))])).values()];
+    const contacts = await this.accounts.contactsByIds(orders.map((o) => o[0]!.userId));
+    return orders.map((o) => this.requestView(o, d, contacts.get(o[0]!.userId.toHexString())));
+  }
+
+  /** At the organizer's: a request found by its code (scanned UGBREQ:…, or typed), with the student and the trip. */
+  async requestByCode(orgId: ObjectId, rawCode: string) {
+    const code = rawCode.trim().toUpperCase().replace(/^UGBREQ:/, '').replace(/\s/g, '');
+    // The whole request's code, or one seat's (still waiting): the request is shown whole, that seat picked.
+    const hit = await this.bookings.findOne({ status: 'held', $or: [{ requestCode: code }, { seatCode: code }] });
+    const order = hit ? await this.bookings.find({ orderId: hit.orderId, status: 'held' }).sort({ slot: 1 }).toArray() : [];
+    const d = order.length ? await this.departures.findOne({ _id: order[0]!.departureId, orgId }) : null;
+    if (!hit || !order.length || !d) return null;
+    const who = (await this.accounts.contactsByIds([order[0]!.userId])).get(order[0]!.userId.toHexString());
+    return { ...this.requestView(order, d, who), title: `${d.from} → ${d.to}`, matched: hit.seatCode === code ? hit._id.toHexString() : null };
+  }
+
+  private requestView(order: BookingDoc[], d: DepartureDoc, who?: { firstName: string; lastName: string; phone: string } | null) {
+    const place = (id: string) => [...d.pickups, ...d.dropoffs].find((s) => s.stopId === id)?.place ?? '';
+    return {
+      id: order[0]!.orderId.toHexString(), status: order[0]!.status, total: order.reduce((n, b) => n + b.price, 0),
+      expiresAt: order[0]!.holdExpiresAt.toISOString(), createdAt: order[0]!.createdAt.toISOString(),
+      student: who ? { name: `${who.firstName} ${who.lastName}`, phone: who.phone } : null,
+      seats: order.map((b) => ({ id: b._id.toHexString(), seat: b.seat, price: b.price, code: b.seatCode ?? null, passenger: b.passenger?.name ?? null, pickup: place(b.pickupStopId), dropoff: place(b.dropoffStopId) })),
+    };
+  }
+
+  /** Requests not validated in time (24 h, or the departure): cancelled, the seats back on sale, the student told. */
+  async expireRequests() {
+    const now = this.clock.now();
+    const due = await this.bookings.find({ status: 'held', paymentId: null, holdExpiresAt: { $lte: now } }).limit(500).toArray();
+    const orders = [...new Map(due.map((b) => [b.orderId.toHexString(), due.filter((x) => x.orderId.equals(b.orderId))])).values()];
+    for (const order of orders) {
+      await this.endRequest(order, 'expired');
+      const d = await this.departures.findOne({ _id: order[0]!.departureId }, { projection: { from: 1, to: 1 } });
+      await this.notifications.notify([order[0]!.userId], {
+        type: 'caravan.request_expired', category: 'paiements', icon: 'time-outline', tone: 'warning', url: `/caravane/${order[0]!.departureId.toHexString()}`,
+        dedupeKey: `caravan-order:${order[0]!.orderId.toHexString()}:expired`,
+        title: `Demande expirée · ${d ? `${d.from} → ${d.to}` : 'Caravane'}`,
+        body: 'L’organisateur ne l’a pas validée à temps : les places sont reparties en vente. Si tu as payé, contacte-le.',
+      });
+    }
+    return orders.length;
   }
 
   /** Called by payments inside its transaction. One payment covers every seat of an order: all are confirmed, or all refunded. */
@@ -424,7 +562,8 @@ export class CaravansService {
    * Held → confirmed, one ticket per seat (a companion's ticket carries their name, held by the purchaser), and the
    * departure confirmed once the minimum is reached. A companion who has an account is then offered their ticket.
    */
-  private async confirm(order: BookingDoc[], method: TicketPaymentMethod, session: ClientSession): Promise<'fulfilled' | 'unfulfillable'> {
+  /** `collectedAt`: the cash the organizer received (a validated request): nothing left to collect at boarding. */
+  private async confirm(order: BookingDoc[], method: TicketPaymentMethod, session: ClientSession, collectedAt: Date | null = null): Promise<'fulfilled' | 'unfulfillable'> {
     const first = order[0]!;
     // Received a ticket by transfer meanwhile: the seat for themselves can't be confirmed, the order is refunded.
     if (order.some((b) => b.forSelf) && (await this.ticketing.hasActiveTicket(first.departureId, first.userId, session))) return 'unfulfillable';
@@ -435,7 +574,7 @@ export class CaravansService {
       const ticket = await this.ticketing.issue(
         {
           kind: 'caravan_seat', eventId: d._id, orgId: d.orgId, purchaserUserId: b.userId, source: { type: 'caravan_booking', id: b._id },
-          price: b.price, paidWith: method, seat: b.seat, details: { pickupStopId: b.pickupStopId, dropoffStopId: b.dropoffStopId }, passenger: b.passenger,
+          price: b.price, paidWith: method, seat: b.seat, details: { pickupStopId: b.pickupStopId, dropoffStopId: b.dropoffStopId }, passenger: b.passenger, cashCollectedAt: collectedAt,
         },
         session,
       );
@@ -525,7 +664,13 @@ export class CaravansService {
         { $set: { status: 'cancelled', seatActive: false, countsForLimit: false, updatedAt: now } },
         { session },
       );
-      if (b) await this.departures.updateOne({ _id: t.eventId }, { $inc: { seatsTaken: -1, seatsConfirmed: -1 }, $set: { updatedAt: now } }, { session });
+      if (!b) return;
+      const d = await this.departures.findOneAndUpdate({ _id: t.eventId }, { $inc: { seatsTaken: -1, seatsConfirmed: -1 }, $set: { updatedAt: now } }, { returnDocument: 'after', session });
+      // Below the minimum again before the deadline: no longer confirmed (it may still fill up). After the deadline a
+      // confirmed departure stays so: one late cancellation never cancels everyone's trip.
+      if (d && d.status === 'confirmed' && d.minPassengers > 0 && d.seatsConfirmed < d.minPassengers && now < d.confirmBy) {
+        await this.departures.updateOne({ _id: d._id, status: 'confirmed' }, { $set: { status: 'published', confirmedAt: null } }, { session });
+      }
     },
 
     transferDeadline: async (t) => {
@@ -801,11 +946,13 @@ export class CaravansService {
     if (route.some((s) => Number.isNaN(s.at.getTime()))) throw errors.validation('Heure d’arrêt invalide.', { field: 'pickups' });
     if (route.some((s, i) => i > 0 && s.at < route[i - 1]!.at)) throw errors.validation('Les arrêts doivent être dans l’ordre du trajet.', { field: 'pickups' });
     const departureAt = pickups[0]!.at;
-    if (departureAt.getTime() < this.clock.now().getTime() + HOUR) throw errors.rule('DEPARTURE_TOO_SOON', 'Le départ doit être dans plus d’une heure.');
+    const now = this.clock.now();
+    if (departureAt <= now) throw errors.rule('DEPARTURE_IN_PAST', 'L’heure du départ est déjà passée.');
     const seats = vehicle.capacity - vehicle.blockedSeats.length;
     if (input.minPassengers > seats) throw errors.validation(`Le minimum dépasse les ${seats} places du véhicule.`, { field: 'minPassengers' });
-    const confirmBy = input.confirmBy ? new Date(input.confirmBy) : new Date(departureAt.getTime() - 24 * HOUR);
-    const bookingClosesAt = input.bookingClosesAt ? new Date(input.bookingClosesAt) : new Date(departureAt.getTime() - BOOKING_CLOSE_MIN * MIN);
+    const { confirmBy: defaultConfirm, bookingClosesAt: defaultClose } = deadlines(departureAt, now);
+    const confirmBy = input.confirmBy ? new Date(input.confirmBy) : defaultConfirm;
+    const bookingClosesAt = input.bookingClosesAt ? new Date(input.bookingClosesAt) : defaultClose;
     if (confirmBy > departureAt || bookingClosesAt > departureAt) throw errors.validation('Les échéances doivent précéder le départ.', { field: 'confirmBy' });
     return {
       vehicle: { label: vehicle.label, plate: vehicle.plate, airConditioned: vehicle.airConditioned, capacity: vehicle.capacity, seatsPerRow: vehicle.seatsPerRow, blockedSeats: vehicle.blockedSeats },
@@ -817,7 +964,7 @@ export class CaravansService {
       departureAt,
       price: input.price,
       maxSeatsPerStudent: input.maxSeatsPerStudent ?? DEFAULT_MAX_SEATS_PER_STUDENT,
-      paymentMethods: input.paymentMethods?.length ? [...new Set(input.paymentMethods)] : [...PAYMENT_METHODS],
+      paymentMethods: ['cash'] as TicketPaymentMethod[],
       minPassengers: input.minPassengers,
       confirmBy,
       bookingClosesAt,
@@ -868,11 +1015,11 @@ export class CaravansService {
     const keep = (list: Stop[]) => list.filter((x) => !remove.has(x.stopId));
     const pickups = [...keep(d.pickups), ...added(input.pickups, 'p', keep(d.pickups))].sort((a, b) => a.at.getTime() - b.at.getTime());
     const dropoffs = [...keep(d.dropoffs), ...added(input.dropoffs, 'd', keep(d.dropoffs))].sort((a, b) => a.at.getTime() - b.at.getTime());
-    if (!dropoffs.length) throw errors.validation('Garde au moins une descente.', { field: 'remove' });
+    if (!dropoffs.length) throw errors.validation('Garde au moins un arrêt.', { field: 'remove' });
     if (pickups.length > 15 || dropoffs.length > 15) throw errors.validation('15 arrêts au plus de chaque côté.', { field: 'pickups' });
     // The departure stays when it was announced: a new pickup comes after the first one.
     if (pickups[0]!.stopId !== d.pickups[0]!.stopId) throw errors.validation('Une nouvelle montée doit être après le départ.', { field: 'pickups' });
-    if (pickups[pickups.length - 1]!.at > dropoffs[0]!.at) throw errors.validation('Les montées doivent précéder les descentes.', { field: 'dropoffs' });
+    if (pickups[pickups.length - 1]!.at > dropoffs[0]!.at) throw errors.validation('Les montées doivent précéder les arrêts.', { field: 'dropoffs' });
 
     let vehicle = d.vehicle;
     let vehicleId = d.vehicleId;
@@ -898,8 +1045,12 @@ export class CaravansService {
     const d = await this.ownDeparture(orgId, id);
     const now = this.clock.now();
     if (d.status !== 'draft') throw errors.conflict('DEPARTURE_PUBLISHED', 'Ce départ est déjà publié.');
-    if (d.bookingClosesAt <= now) throw errors.rule('DEPARTURE_TOO_SOON', 'Trop tard pour publier ce départ.');
-    await this.departures.updateOne({ _id: id, status: 'draft' }, { $set: { status: d.minPassengers === 0 ? 'confirmed' : 'published', updatedAt: now } });
+    if (d.departureAt <= now) throw errors.rule('DEPARTURE_IN_PAST', 'L’heure du départ est passée : choisis un autre jour ou une autre heure.');
+    // A draft kept a while: deadlines already gone are moved, never left in the past (the worker would cancel it).
+    const fresh = deadlines(d.departureAt, now);
+    const confirmBy = d.confirmBy > now ? d.confirmBy : fresh.confirmBy;
+    const bookingClosesAt = d.bookingClosesAt > now ? d.bookingClosesAt : fresh.bookingClosesAt;
+    await this.departures.updateOne({ _id: id, status: 'draft' }, { $set: { status: d.minPassengers === 0 ? 'confirmed' : 'published', confirmBy, bookingClosesAt, updatedAt: now } });
     return this.ownDeparture(orgId, id);
   }
 
@@ -965,6 +1116,7 @@ export class CaravansService {
    * - Departed and past arrival: completed, counted in the organizer's trips.
    */
   async sweep() {
+    await this.expireRequests();
     const now = this.clock.now();
     const short = await this.departures.find({ status: 'published', confirmBy: { $lte: now } }, { projection: { _id: 1, seatsConfirmed: 1, minPassengers: 1 } }).toArray();
     for (const d of short) {

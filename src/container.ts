@@ -62,7 +62,7 @@ export async function createContainer(config: Config, opts: { clock?: Clock; war
   const organizations = (late.organizations = createOrganizationsModule({ db: mongo.db, clock, accounts, audit, notifications: () => late.notifications! }));
   const identity = createIdentityModule({ db: mongo.db, mongo: mongo.client, config, clock, queues, limiter, tokens, denylist, accounts, audit });
   const notifications = (late.notifications = createNotificationsModule({ db: mongo.db, clock, hub, queues, accounts, config }));
-  const payments = createPaymentsModule({ db: mongo.db, mongo: mongo.client, clock, config, queues, accounts, notifications });
+  const payments = createPaymentsModule({ db: mongo.db, mongo: mongo.client, clock, config, queues, accounts, notifications, organizations });
   const messaging = createMessagingModule({ db: mongo.db, clock, hub, limiter, audit, notifications });
   const ticketing = createTicketingModule({ db: mongo.db, mongo: mongo.client, clock, tokens, accounts, organizations, payments, hub, limiter, audit, notifications });
   const caravans = createCaravansModule({ db: mongo.db, mongo: mongo.client, clock, accounts, organizations, payments, ticketing, hub, limiter, audit, notifications });

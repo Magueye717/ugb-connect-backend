@@ -25,11 +25,11 @@ const ok = async (res: Promise<{ statusCode: number; body: string }>, status = 2
   expect(r.statusCode, r.body).toBe(status);
   return json(r);
 };
-const pay = (reference: string, action: 'pay' | 'fail' = 'pay') =>
-  t.app.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${reference}/${action}`, headers: { 'content-type': 'text/plain' }, payload: '' });
 const at = (ms: number) => new Date(T0 + ms).toISOString();
 
 let seq = 0;
+/** Each departure's organizer, to validate the requests made on it. */
+const organizerOf = new Map<string, { owner: Who; orgId: string }>();
 /** An organization with an owner and a scanner, a 12-seat minibus, and a published departure in 3 days. */
 async function setup(over: { minPassengers?: number; departIn?: number; paymentMethods?: string[] } = {}) {
   t.clock.set(T0);
@@ -52,27 +52,77 @@ async function setup(over: { minPassengers?: number; departIn?: number; paymentM
   );
   expect(draft.status).toBe('draft');
   const dep = await ok(call(o, 'POST', `/org/${orgId}/departures/${draft.id}/publish`));
+  organizerOf.set(dep.id, { owner: o, orgId });
   return { owner: o, scanner: { userId: scanner.userId.toHexString() }, orgId, dep };
 }
 
-/** Books (auto or chosen seat) and pays through the simulator; returns the ticket. */
+/** The order a booking belongs to (all its seats are validated or refused together). */
+const orderOf = async (bookingId: string) => ((await t.c.mongo.db.collection('bookings').findOne({ _id: new ObjectId(bookingId) }))!.orderId as ObjectId).toHexString();
+/** The organizer validates a request (the cash handed over), as the departure's owner. */
+async function validate(depId: string, bookingId: string) {
+  const { owner, orgId } = organizerOf.get(depId)!;
+  return ok(call(owner, 'POST', `/org/${orgId}/departures/requests/${await orderOf(bookingId)}/validate`));
+}
+
+/** Requests a seat (auto or chosen), then the organizer validates it (paid in cash); returns the ticket. */
 async function buy(s: Who, depId: string, body: object = {}) {
-  const { booking, payment } = await ok(call(s, 'POST', `/caravans/departures/${depId}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'wave', ...body }), 201);
+  const { booking, payment } = await ok(call(s, 'POST', `/caravans/departures/${depId}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', ...body }), 201);
   expect(booking.status).toBe('held');
-  await pay(payment.reference);
+  expect(payment).toBeNull();
+  await validate(depId, booking.id);
   const done = await ok(call(s, 'GET', `/caravans/bookings/${booking.id}`));
   expect(done).toMatchObject({ status: 'confirmed' });
   return ok(call(s, 'GET', `/tickets/${done.ticketId}`));
 }
 
 describe('browse and book', () => {
-  it('the organizer chooses the providers: one only, the other is refused', async () => {
-    const { dep } = await setup({ paymentMethods: ['wave'] });
-    expect(dep.paymentMethods).toEqual(['wave']);
+  it('a seat is a request: paid to the organizer in cash, who validates it; nothing to collect at boarding', async () => {
+    const { dep, owner, orgId } = await setup();
+    expect(dep.paymentMethods).toEqual(['cash']);
     const s = await registerStudent(t);
-    const refused = await call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'orange_money' });
-    expect(json(refused).field).toBe('method');
-    expect((await setup()).dep.paymentMethods).toEqual(['wave', 'orange_money']);
+    const { booking, payment } = await ok(call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'wave' }), 201);
+    expect(payment).toBeNull();
+    expect(new Date((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).myBooking.holdExpiresAt).getTime()).toBe(T0 + DAY);
+    const pending = (await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).myBooking;
+    expect(pending).toMatchObject({ awaitingValidation: true, total: 3500, code: expect.stringMatching(/^[0-9A-Z]{6}$/), organizer: { name: expect.any(String), phone: expect.any(String) } });
+    // Its QR code (or the code typed) finds it at the organizer's, nowhere else.
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/departures/requests/by-code/UGBREQ:${pending.code}`))).request).toMatchObject({ id: await orderOf(booking.id), title: 'UGB → Dakar', total: 3500 });
+    const otherOrg = await setup();
+    expect((await ok(call(otherOrg.owner, 'GET', `/org/${otherOrg.orgId}/departures/requests/by-code/${pending.code}`))).request).toBeNull();
+    // The organizer is told, and sees who, which seat, which stops.
+    const list = (await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}/requests`))).items;
+    expect(list).toEqual([expect.objectContaining({ total: 3500, student: expect.objectContaining({ phone: expect.any(String) }), seats: [expect.objectContaining({ pickup: 'UGB · Village E', dropoff: 'Dakar · Colobane' })] })]);
+    // A second request for the same departure: refused while one waits.
+    expect(json(await call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2' })).code).toBe('REQUEST_PENDING');
+    // Someone else can't validate it.
+    const stranger = await registerStudent(t);
+    expect((await call(stranger, 'POST', `/org/${orgId}/departures/requests/${await orderOf(booking.id)}/validate`)).statusCode).toBe(404);
+    await validate(dep.id, booking.id);
+    const done = await ok(call(s, 'GET', `/caravans/bookings/${booking.id}`));
+    expect(await ok(call(s, 'GET', `/tickets/${done.ticketId}`))).toMatchObject({ status: 'active', paidWith: 'cash', cashDue: 0 });
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}/requests`))).items).toEqual([]);
+  });
+
+  it('refused, or not validated within 24 h: cancelled, the seat back on sale; 3 requests at most at once', async () => {
+    const deps = [await setup(), await setup(), await setup(), await setup()];
+    const s = await registerStudent(t);
+    const ask = (i: number) => call(s, 'POST', `/caravans/departures/${deps[i]!.dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2' });
+    const first = (await ok(ask(0), 201)).booking;
+    const second = (await ok(ask(1), 201)).booking;
+    await ok(ask(2), 201);
+    expect(json(await ask(3)).code).toBe('TOO_MANY_REQUESTS');
+    // Refused with a reason: the student is told, the seat is free again.
+    const { owner, orgId } = organizerOf.get(deps[0]!.dep.id)!;
+    expect((await call(owner, 'POST', `/org/${orgId}/departures/requests/${await orderOf(first.id)}/refuse`, { reason: 'Paiement non reçu' })).statusCode).toBe(204);
+    expect(await ok(call(s, 'GET', `/caravans/bookings/${first.id}`))).toMatchObject({ status: 'cancelled' });
+    expect((await ok(call(s, 'GET', `/caravans/departures/${deps[0]!.dep.id}`))).seatsFree).toBe(12);
+    expect((await ok(call(s, 'GET', '/notifications'))).items.map((n: { body: string }) => n.body)).toContain('Paiement non reçu');
+    // 24 h later, nobody validated the others: expired, seats back.
+    t.clock.advance(DAY + MIN);
+    await t.c.modules.caravans.service.sweep();
+    expect(await ok(call(s, 'GET', `/caravans/bookings/${second.id}`))).toMatchObject({ status: 'expired' });
+    expect((await ok(call(s, 'GET', `/caravans/departures/${deps[1]!.dep.id}`))).seatsFree).toBe(12);
+    expect(json(await call(owner, 'POST', `/org/${orgId}/departures/requests/${await orderOf(second.id)}/validate`)).code).toBeDefined();
   });
 
   it('lists published departures; the plate is for ticket holders only', async () => {
@@ -113,14 +163,11 @@ describe('browse and book', () => {
     expect((await call(other, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'd1', dropoffStopId: 'p1', method: 'wave' })).statusCode).toBe(400);
   });
 
-  it('an unpaid seat goes back after 10 min; releasing it is immediate', async () => {
+  it('the student withdraws a request: the seat is free at once', async () => {
     const { dep } = await setup();
     const s = await registerStudent(t);
-    const { booking } = await ok(call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }), 201);
-    t.clock.advance(11 * MIN);
-    await t.c.modules.payments.sweep();
-    expect(await ok(call(s, 'GET', `/caravans/bookings/${booking.id}`))).toMatchObject({ status: 'expired' });
-    const again = await ok(call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }), 201);
+    const again = await ok(call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1' }), 201);
+    expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).seatsFree).toBe(11);
     expect((await call(s, 'DELETE', `/caravans/bookings/${again.booking.id}`)).statusCode).toBe(204);
     expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).seatsFree).toBe(12);
   });
@@ -135,21 +182,56 @@ describe('browse and book', () => {
   });
 });
 
+describe('a departure soon', () => {
+  it('in 20 minutes: allowed, on sale until it leaves, its minimum checked then (not cancelled at once)', async () => {
+    const { owner, orgId, dep } = await setup({ departIn: 20 * MIN, minPassengers: 2 });
+    const mine = await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}`));
+    expect(mine.bookingClosesAt).toBe(at(20 * MIN));
+    expect(mine.confirmBy).toBe(at(20 * MIN));
+    await t.c.modules.caravans.service.sweep();
+    const s = await registerStudent(t);
+    expect(await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).toMatchObject({ status: 'published', bookingOpen: true });
+    await buy(s, dep.id);
+  });
+
+  it('in 5 hours: on sale until it leaves, its minimum checked then (not 24 h before)', async () => {
+    const { owner, orgId, dep } = await setup({ departIn: 5 * HOUR, minPassengers: 2 });
+    const mine = await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}`));
+    expect(mine.confirmBy).toBe(at(5 * HOUR));
+    expect(mine.bookingClosesAt).toBe(at(5 * HOUR));
+    await t.c.modules.caravans.service.sweep();
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}`))).status).toBe('published');
+  });
+});
+
 describe('cancel', () => {
-  it('free until 24 h before, then 10 %; refused once the bus has left; the seat is sold again', async () => {
+  it('below the minimum again: no longer confirmed before the deadline; after it, it stays confirmed', async () => {
+    const { dep } = await setup({ minPassengers: 2 });
+    const [a, b, c] = [await registerStudent(t), await registerStudent(t), await registerStudent(t)];
+    const ta = await buy(a, dep.id);
+    await buy(b, dep.id);
+    expect((await ok(call(a, 'GET', `/caravans/departures/${dep.id}`))).confirmed).toBe(true);
+    await ok(call(a, 'POST', `/tickets/${ta.id}/cancel`));
+    expect(await ok(call(b, 'GET', `/caravans/departures/${dep.id}`))).toMatchObject({ confirmed: false, status: 'published' });
+    const tc = await buy(c, dep.id);
+    expect((await ok(call(b, 'GET', `/caravans/departures/${dep.id}`))).confirmed).toBe(true);
+    // Past the deadline (24 h before): one cancellation doesn't undo the trip.
+    t.clock.advance(2 * DAY + HOUR);
+    await ok(call(c, 'POST', `/tickets/${tc.id}/cancel`));
+    expect((await ok(call(b, 'GET', `/caravans/departures/${dep.id}`))).confirmed).toBe(true);
+  });
+
+
+  it('cancelling: nothing refunded by the app (paid to the organizer in cash); refused once the bus has left; the seat is sold again', async () => {
     const { dep } = await setup();
-    const [early, late] = [await registerStudent(t), await registerStudent(t)];
+    const early = await registerStudent(t);
     const t1 = await buy(early, dep.id);
-    expect(t1.cancellationQuote).toMatchObject({ allowed: true, fee: 0, refund: 3500 });
-    expect(await ok(call(early, 'POST', `/tickets/${t1.id}/cancel`))).toEqual({ refundAmount: 3500, fee: 0 });
-    expect(await t.c.mongo.db.collection('payouts').findOne({ idempotencyKey: `ticket:${t1.id}:cancel` })).toMatchObject({ amount: 3500, reason: 'ticket_cancelled' });
+    expect(t1.cancellationQuote).toMatchObject({ allowed: true, fee: 0, refund: 0 });
+    expect(await ok(call(early, 'POST', `/tickets/${t1.id}/cancel`))).toEqual({ refundAmount: 0, fee: 0 });
+    expect(await t.c.mongo.db.collection('payouts').countDocuments({ idempotencyKey: `ticket:${t1.id}:cancel` })).toBe(0);
     expect((await ok(call(early, 'GET', `/tickets/${t1.id}`))).status).toBe('cancelled');
     expect((await buy(early, dep.id)).seat).toBe(2); // can book again after cancelling
-
-    const t2 = await buy(late, dep.id);
-    t.clock.advance(3 * DAY - 12 * HOUR);
-    expect(await ok(call(late, 'POST', `/tickets/${t2.id}/cancel`))).toEqual({ refundAmount: 3150, fee: 350 });
-    t.clock.advance(13 * HOUR);
+    t.clock.advance(3 * DAY + HOUR);
     const t3 = (await ok(call(early, 'GET', '/tickets'))).items.find((x: { status: string }) => x.status === 'active');
     expect(json(await call(early, 'POST', `/tickets/${t3.id}/cancel`)).code).toBe('CANCELLATION_REFUSED');
   });
@@ -234,76 +316,53 @@ describe('boarding', () => {
     expect(await ok(call(scanner, 'POST', `/org/${orgId}/admissions`, { qr: 'not.a.ticket', clientScanId: 'junk-scan-01' }))).toMatchObject({ result: 'rejected', reason: 'bad_signature' });
   });
 
-  it('leaving the first stop starts the trip; who wasn’t scanned there is absent; the owner claims the money once', async () => {
+  it('leaving the first stop starts the trip; who wasn’t scanned there is absent; nothing to claim (paid in cash)', async () => {
     const { dep, orgId, owner, scanner } = await setup({ minPassengers: 1 });
     const [a, b] = [await registerStudent(t), await registerStudent(t)];
     const ta = await buy(a, dep.id);
     const tb = await buy(b, dep.id);
     t.clock.set(T0 + 3 * DAY);
     await ok(call(scanner, 'POST', `/org/${orgId}/admissions`, { qr: ta.qr, clientScanId: 'leave-scan-1' }));
-    expect(json(await call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'wave' })).code).toBe('DEPARTURE_NOT_DEPARTED');
     const left = await ok(call(scanner, 'POST', `/org/${orgId}/departures/${dep.id}/stops/p1/leave`));
     expect(left.absent).toEqual([{ ticketId: tb.id, seat: tb.seat }]);
     expect((await ok(call(owner, 'GET', `/org/${orgId}/departures/${dep.id}`))).status).toBe('departed');
 
-    expect((await call(scanner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'wave' })).statusCode).toBe(404); // owner only
-    const claim = await ok(call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'orange_money' }));
-    expect(claim).toMatchObject({ kind: 'organizer_claim', amount: 7000, method: 'orange_money', status: 'requested' });
-    expect((await ok(call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'wave' }))).id).toBe(claim.id);
+    // The seats were paid to the organizer in cash: the app has nothing to pay out.
+    expect(json(await call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'wave' })).code).toBe('NOTHING_TO_CLAIM');
   });
 });
 
 describe('cash', () => {
-  it('a departure taking cash: booked at once, collected at the scan, never refunded nor paid out by the app', async () => {
-    const { dep, orgId, owner, scanner } = await setup({ minPassengers: 1, paymentMethods: ['wave', 'cash'] });
-    expect(dep.paymentMethods).toEqual(['wave', 'cash']);
-    const [a, b, c] = [await registerStudent(t), await registerStudent(t), await registerStudent(t)];
-    expect(json(await call(a, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'orange_money' })).field).toBe('method');
-
-    // Cash: nothing to pay in the app, the ticket is there at once, its price to hand over at boarding.
-    const booked = await ok(call(a, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'cash' }), 201);
-    expect(booked.payment).toBeNull();
-    expect(booked.booking).toMatchObject({ status: 'confirmed' });
-    const ta = await ok(call(a, 'GET', `/tickets/${booked.booking.ticketId}`));
-    expect(ta).toMatchObject({ paidWith: 'cash', cashDue: 3500, status: 'active' });
-    await buy(b, dep.id);
-
-    // Cancelling a cash ticket: nothing to refund, nothing paid out.
-    const cBooked = await ok(call(c, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'cash' }), 201);
-    expect(await ok(call(c, 'POST', `/tickets/${cBooked.booking.ticketId}/cancel`))).toMatchObject({ refundAmount: 0, fee: 0 });
-    expect(await t.c.mongo.db.collection('payouts').countDocuments({ 'source.id': new ObjectId(cBooked.booking.ticketId) })).toBe(0);
-
-    // At boarding: the scanner is told what to take, once.
+  it('a validated seat is already paid: nothing to collect at boarding; nothing refunded nor paid out by the app', async () => {
+    const { dep, orgId, scanner } = await setup({ minPassengers: 1 });
+    const a = await registerStudent(t);
+    const ta = await buy(a, dep.id);
+    expect(ta).toMatchObject({ paidWith: 'cash', cashDue: 0, status: 'active' });
     t.clock.set(T0 + 3 * DAY - 30 * MIN);
     const scan = await ok(call(scanner, 'POST', `/org/${orgId}/admissions`, { qr: ta.qr, clientScanId: 'cash-scan-01' }));
-    expect(scan).toMatchObject({ result: 'admitted', tone: 'warning', cashDue: 3500 });
-    expect(scan.text).toContain('À encaisser : 3 500 FCFA en espèces.');
-    expect((await ok(call(a, 'GET', `/tickets/${ta.id}`))).cashDue).toBe(0);
-
-    // The organizer's payout counts the Wave seat only: the cash is already in their hands.
-    t.clock.set(T0 + 3 * DAY);
-    await ok(call(scanner, 'POST', `/org/${orgId}/departures/${dep.id}/stops/p1/leave`));
-    expect(await ok(call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/claim`, { method: 'wave' }))).toMatchObject({ amount: 3500 });
+    expect(scan).toMatchObject({ result: 'admitted', cashDue: 0 });
+    expect(scan.text).not.toContain('À encaisser');
   });
 });
 
 describe('cancelled departures', () => {
-  it('minimum not reached at the deadline: cancelled, everyone refunded 100 %', async () => {
+  it('minimum not reached at the deadline: cancelled (paid in cash: the organizer refunds, not the app)', async () => {
     const { dep } = await setup({ minPassengers: 3 });
     const s = await registerStudent(t);
     const ticket = await buy(s, dep.id);
     t.clock.set(T0 + 2 * DAY + MIN);
     await t.c.modules.caravans.service.sweep();
-    expect(await ok(call(s, 'GET', `/tickets/${ticket.id}`))).toMatchObject({ status: 'cancelled', cancellation: { reason: 'min_not_reached', refundAmount: 3500, fee: 0 } });
+    expect(await ok(call(s, 'GET', `/tickets/${ticket.id}`))).toMatchObject({ status: 'cancelled', cancellation: { reason: 'min_not_reached', refundAmount: 0, fee: 0 } });
   });
 
-  it('the organizer cancels: tickets refunded, unpaid holds released, nothing left to sell', async () => {
+  it('the organizer cancels: tickets cancelled, waiting requests released, nothing left to sell', async () => {
     const { dep, orgId, owner } = await setup();
     const [a, b] = [await registerStudent(t), await registerStudent(t)];
     const ta = await buy(a, dep.id);
-    await ok(call(b, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }), 201);
-    expect(await ok(call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/cancel`, { reason: 'Panne du bus' }))).toEqual({ refunded: 1 });
-    expect((await ok(call(a, 'GET', `/tickets/${ta.id}`))).cancellation).toMatchObject({ reason: 'event_cancelled', refundAmount: 3500 });
+    const waiting = (await ok(call(b, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1' }), 201)).booking;
+    expect(await ok(call(owner, 'POST', `/org/${orgId}/departures/${dep.id}/cancel`, { reason: 'Panne du bus' }))).toEqual({ refunded: 0 });
+    expect((await ok(call(a, 'GET', `/tickets/${ta.id}`))).cancellation).toMatchObject({ reason: 'event_cancelled', refundAmount: 0 });
+    expect(await ok(call(b, 'GET', `/caravans/bookings/${waiting.id}`))).toMatchObject({ status: 'cancelled' });
     expect((await ok(call(a, 'GET', '/caravans/departures'))).items.some((d: { id: string }) => d.id === dep.id)).toBe(false);
   });
 });
@@ -349,12 +408,36 @@ describe('a seat for a companion', () => {
   const companion = (name: string, phone: string, seat?: number) => ({ ...(seat ? { seat } : {}), passenger: { name, phone } });
   const bookSeats = (s: Who, depId: string, seats: object[]) => call(s, 'POST', `/caravans/departures/${depId}/bookings`, { seats, pickupStopId: 'p1', dropoffStopId: 'd2', method: 'wave' });
 
-  it('two seats, one payment: the companion’s ticket carries their name and stays in the buyer’s app', async () => {
+  it('two seats, each with its own code: the companion’s paid and validated alone, mine keeps waiting', async () => {
+    const { dep, owner, orgId } = await setup({ minPassengers: 2 });
+    const s = await registerStudent(t);
+    const { booking } = await ok(bookSeats(s, dep.id, [{ seat: 7 }, companion('Awa Ndiaye', nextPhone(), 8)]), 201);
+    const mine = (await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).myBooking;
+    const [me, awa] = mine.seats;
+    expect(me.code).toMatch(/^[0-9A-Z]{6}$/);
+    expect(me.code).not.toBe(awa.code);
+    expect(awa.code).not.toBe(mine.code);
+    // Awa's seat scanned: the request is found, her seat picked.
+    const found = (await ok(call(owner, 'GET', `/org/${orgId}/departures/requests/by-code/UGBREQ:${awa.code}`))).request;
+    expect(found).toMatchObject({ matched: awa.id, total: 7000, seats: [expect.objectContaining({ id: me.id, seat: 7 }), expect.objectContaining({ id: awa.id, seat: 8 })] });
+    const order = await orderOf(booking.id);
+    const left = await ok(call(owner, 'POST', `/org/${orgId}/departures/requests/${order}/validate`, { bookingIds: [awa.id] }));
+    expect(left).toMatchObject({ total: 3500, seats: [expect.objectContaining({ id: me.id })] });
+    const tickets = (await ok(call(s, 'GET', '/tickets'))).items.filter((x: { kind: string; status: string }) => x.kind === 'caravan_seat' && x.status === 'active');
+    expect(tickets.map((x: { seat: number }) => x.seat)).toEqual([8]);
+    expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).myBooking).toMatchObject({ total: 3500, seats: [{ seat: 7 }] });
+    expect(json(await call(owner, 'POST', `/org/${orgId}/departures/requests/${order}/validate`, { bookingIds: [awa.id] })).code).toBe('SEAT_NOT_WAITING');
+    // Mine paid later: validated with the request's code, the request is done.
+    await ok(call(owner, 'POST', `/org/${orgId}/departures/requests/${order}/validate`));
+    expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).myBooking).toBeNull();
+  });
+
+  it('two seats, one request: the companion’s ticket carries their name and stays in the buyer’s app', async () => {
     const { dep } = await setup({ minPassengers: 2 });
     const s = await registerStudent(t);
     const awaPhone = nextPhone();
     const { booking, payment } = await ok(bookSeats(s, dep.id, [{ seat: 7 }, companion('  Awa   Ndiaye ', awaPhone, 8)]), 201);
-    expect(payment.amount).toBe(7000);
+    expect(payment).toBeNull();
     expect(booking.seats).toEqual([
       { seat: 7, passenger: null, status: 'held', ticketId: null },
       { seat: 8, passenger: { name: 'Awa Ndiaye', phone: expect.stringMatching(/^\+221 /) }, status: 'held', ticketId: null },
@@ -362,7 +445,7 @@ describe('a seat for a companion', () => {
     const held = await ok(call(s, 'GET', `/caravans/departures/${dep.id}`));
     expect(held).toMatchObject({ seatsFree: 10, mySeatsLeft: 0, maxSeatsPerStudent: 2, myBooking: { seats: [{ seat: 7 }, { seat: 8, passenger: { name: 'Awa Ndiaye' } }] } });
 
-    await pay(payment.reference);
+    await validate(dep.id, booking.id);
     const done = await ok(call(s, 'GET', `/caravans/bookings/${booking.id}`));
     expect(done.seats.map((x: { status: string }) => x.status)).toEqual(['confirmed', 'confirmed']);
     // Two paid seats: the minimum of 2 is reached.
@@ -376,9 +459,21 @@ describe('a seat for a companion', () => {
 
     // A third seat: over the limit.
     expect(json(await bookSeats(s, dep.id, [companion('Ami Trois', nextPhone())])).code).toBe('SEAT_LIMIT');
-    // Cancelling the companion's ticket refunds the buyer and frees a slot.
-    expect(await ok(call(s, 'POST', `/tickets/${tickets[1].id}/cancel`))).toEqual({ refundAmount: 3500, fee: 0 });
+    // Cancelling the companion's ticket frees a slot (paid to the organizer in cash: nothing refunded by the app).
+    expect(await ok(call(s, 'POST', `/tickets/${tickets[1].id}/cancel`))).toEqual({ refundAmount: 0, fee: 0 });
     expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).mySeatsLeft).toBe(1);
+  });
+
+  it('a companion may board and get off at other stops than the buyer', async () => {
+    const { dep } = await setup();
+    const s = await registerStudent(t);
+    expect(json(await bookSeats(s, dep.id, [{}, { ...companion('Awa Ndiaye', nextPhone()), pickupStopId: 'p9' }])).field).toBe('pickupStopId');
+    const { booking } = await ok(bookSeats(s, dep.id, [{}, { ...companion('Awa Ndiaye', nextPhone()), pickupStopId: 'p2', dropoffStopId: 'd1' }]), 201);
+    await validate(dep.id, booking.id);
+    const done = await ok(call(s, 'GET', `/caravans/bookings/${booking.id}`));
+    const [mine, hers] = await Promise.all(done.seats.map((x: { ticketId: string }) => ok(call(s, 'GET', `/tickets/${x.ticketId}`))));
+    expect(mine.details).toMatchObject({ pickup: { place: 'UGB · Village E' }, dropoff: { place: 'Dakar · Colobane' } });
+    expect(hers.details).toMatchObject({ pickup: { place: 'Saint-Louis · Gare routière' }, dropoff: { place: 'Thiès · Mairie' } });
   });
 
   it('refuses two seats for yourself, your own number, a number already travelling, and a third seat', async () => {
@@ -395,8 +490,8 @@ describe('a seat for a companion', () => {
     await buy(other, dep.id);
     // Already has their own ticket, or is someone's companion already.
     expect(json(await bookSeats(s, dep.id, [{}, companion('Awa Diop', other.phone)])).code).toBe('PASSENGER_HAS_SEAT');
-    const { payment } = await ok(bookSeats(other, dep.id, [companion('Fatou Sow', p)]), 201);
-    await pay(payment.reference);
+    const fatou = (await ok(bookSeats(other, dep.id, [companion('Fatou Sow', p)]), 201)).booking;
+    await validate(dep.id, fatou.id);
     expect(json(await bookSeats(s, dep.id, [{}, companion('Fatou Sow', p)])).code).toBe('PASSENGER_HAS_SEAT');
   });
 
@@ -408,10 +503,10 @@ describe('a seat for a companion', () => {
     expect((await call(s, 'DELETE', `/caravans/bookings/${booking.id}`)).statusCode).toBe(204);
     expect(await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).toMatchObject({ seatsFree: 12, mySeatsLeft: 2, myBooking: null });
 
-    // Paid too late for both seats: the whole order goes back.
+    // Not validated within 24 h: the whole request goes back.
     const late = await ok(bookSeats(s, dep.id, [{ seat: 2 }, companion('Awa Ndiaye', nextPhone(), 3)]), 201);
-    t.clock.advance(11 * MIN);
-    await t.c.modules.payments.sweep();
+    t.clock.advance(DAY + MIN);
+    await t.c.modules.caravans.service.sweep();
     expect((await ok(call(s, 'GET', `/caravans/bookings/${late.booking.id}`))).seats.map((x: { status: string }) => x.status)).toEqual(['expired', 'expired']);
     expect((await ok(call(s, 'GET', `/caravans/departures/${dep.id}`))).seatsFree).toBe(12);
 
@@ -440,8 +535,8 @@ describe('a seat for a companion', () => {
   it('a companion with an account is offered the ticket; accepting makes it theirs, the group stays visible', async () => {
     const { dep, orgId, scanner } = await setup();
     const [moussa, awa] = [await registerStudent(t), await registerStudent(t)];
-    const { booking, payment } = await ok(bookSeats(moussa, dep.id, [{ seat: 7 }, companion('Awa Ndiaye', awa.phone, 8)]), 201);
-    await pay(payment.reference);
+    const { booking } = await ok(bookSeats(moussa, dep.id, [{ seat: 7 }, companion('Awa Ndiaye', awa.phone, 8)]), 201);
+    await validate(dep.id, booking.id);
     await new Promise((r) => setTimeout(r, 100)); // after-commit offer
     const incoming = (await ok(call(awa, 'GET', '/ticket-transfers?direction=incoming'))).items;
     expect(incoming).toHaveLength(1);
@@ -465,8 +560,8 @@ describe('a seat for a companion', () => {
     const { dep, orgId, scanner } = await setup({ departIn: 2 * HOUR });
     const moussa = await registerStudent(t);
     const phone = nextPhone();
-    const { payment } = await ok(bookSeats(moussa, dep.id, [{ seat: 7 }, companion('Awa Ndiaye', phone, 8)]), 201);
-    await pay(payment.reference);
+    const moussaBooking = (await ok(bookSeats(moussa, dep.id, [{ seat: 7 }, companion('Awa Ndiaye', phone, 8)]), 201)).booking;
+    await validate(dep.id, moussaBooking.id);
     const manifest = await ok(call(scanner, 'GET', `/org/${orgId}/departures/${dep.id}/manifest`));
     expect(manifest.passengers).toEqual([
       expect.objectContaining({ seat: 7, name: 'Awa Diop', companionOf: null, groupSize: 2, purchaser: { id: moussa.userId, name: 'Awa Diop' } }),
@@ -503,7 +598,8 @@ describe('creating a departure from the app', () => {
     // A scanner checks tickets; creating is for the owner and managers (refused like any route outside one's role).
     expect((await call(scanner, 'POST', `/org/${orgId}/departures`, body)).statusCode).toBe(404);
     const draft = await ok(call(owner, 'POST', `/org/${orgId}/departures`, body), 201);
-    expect(draft).toMatchObject({ status: 'draft', vehicleId: items[0].id, bookingClosesAt: at(4 * DAY - 30 * MIN), paymentMethods: ['wave', 'cash'] });
+    // Seats are paid to the organizer in cash, whatever the form sends.
+    expect(draft).toMatchObject({ status: 'draft', vehicleId: items[0].id, bookingClosesAt: at(4 * DAY), paymentMethods: ['cash'] });
     const edited = await ok(call(owner, 'PUT', `/org/${orgId}/departures/${draft.id}`, { ...body, price: 4500 }));
     expect(edited.price).toBe(4500);
     expect((await ok(call(owner, 'POST', `/org/${orgId}/departures/${draft.id}/publish`))).status).toBe('confirmed');
@@ -580,9 +676,9 @@ describe('rows of 5 (with the folding middle seat)', () => {
     // the middle (versailler) 5 and 10 last.
     expect(map.firstRowSeats).toBe(2);
     for (const seat of [2, 3, 7, 8, 1, 4, 6, 9]) {
-      const { booking, payment } = await ok(call(await registerStudent(t), 'POST', `/caravans/departures/${d.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }), 201);
+      // A request already holds its seat.
+      const { booking } = await ok(call(await registerStudent(t), 'POST', `/caravans/departures/${d.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1' }), 201);
       expect(booking.seat).toBe(seat);
-      await pay(payment.reference);
     }
     expect((await ok(call(s, 'GET', `/caravans/departures/${d.id}/seats`))).suggested).toBe(5);
   });
@@ -606,7 +702,7 @@ describe('editing a published departure', () => {
 
     expect(json(await call(owner, 'PATCH', url, { pickups: [{ place: 'Avant', at: at(start - HOUR) }] })).message).toBe('Une nouvelle montée doit être après le départ.');
     expect(json(await call(owner, 'PATCH', url, { pickups: [{ place: 'louga · gare', at: at(start + 3 * HOUR) }] })).message).toBe('« louga · gare » est déjà un arrêt de ce départ.');
-    expect(json(await call(owner, 'PATCH', url, { pickups: [{ place: 'Après Thiès', at: at(start + 4.5 * HOUR) }] })).message).toBe('Les montées doivent précéder les descentes.');
+    expect(json(await call(owner, 'PATCH', url, { pickups: [{ place: 'Après Thiès', at: at(start + 4.5 * HOUR) }] })).message).toBe('Les montées doivent précéder les arrêts.');
 
     const small = await ok(call(owner, 'POST', `/org/${orgId}/vehicles`, { label: 'Minibus 8', capacity: 8 }), 201);
     expect(json(await call(owner, 'PATCH', url, { vehicleId: small.id })).field).toBe('vehicleId');
@@ -625,14 +721,11 @@ describe('editing a published departure', () => {
 });
 
 describe('offline scanning', () => {
-  it('the pack says what to collect in cash; a stop left offline keeps the time it was left', async () => {
-    const { owner, scanner, orgId, dep } = await setup({ paymentMethods: ['wave', 'cash'] });
-    const s = await registerStudent(t);
-    const { booking } = await ok(call(s, 'POST', `/caravans/departures/${dep.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd2', method: 'cash' }), 201);
-    const paidOnline = await buy(await registerStudent(t), dep.id);
+  it('the pack has nothing to collect (validated seats are paid); a stop left offline keeps the time it was left', async () => {
+    const { owner, scanner, orgId, dep } = await setup();
+    await buy(await registerStudent(t), dep.id);
     const pack = await ok(call(scanner, 'GET', `/org/${orgId}/departures/${dep.id}/offline-pack`));
-    expect(pack.cash).toEqual({ [booking.ticketId]: 3500 });
-    expect(pack.cash[paidOnline.id]).toBeUndefined();
+    expect(pack.cash).toEqual({});
 
     t.clock.set(T0 + 3 * DAY + 10 * MIN);
     const leftAt = at(3 * DAY + 2 * MIN);

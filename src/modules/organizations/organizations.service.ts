@@ -8,7 +8,7 @@ import { normalizeEmail } from '../../platform/email.js';
 import { normalizePhone } from '../../platform/phone.js';
 import type { AccountsApi, MembershipSummary } from '../accounts/index.js';
 import type { NotificationsApi } from '../notifications/index.js';
-import { PAYOUT_PROVIDERS, spacesOf, type MembershipDoc, type OrgCapability, type OrgCategory, type OrgLevel, type OrgRole, type OrgSpace, type OrganizationDoc, type PayoutProvider } from './organizations.types.js';
+import { PAYOUT_PROVIDERS, shownLevel, spacesOf, type MembershipDoc, type OrgCapability, type OrgCategory, type OrgLevel, type OrgRole, type OrgSpace, type OrganizationDoc, type PayoutProvider } from './organizations.types.js';
 
 /** How each space names its roles (what the member is told, what the team list shows). */
 export const SPACE_LABELS: Record<OrgSpace, string> = { organizer: 'Organisateur', restaurant: 'Restaurant', shop: 'Boutique' };
@@ -157,7 +157,7 @@ export class OrganizationsService {
     const owner = known ?? (await this.accounts.createStaffUser({ phone, firstName: input.owner.firstName!, lastName: input.owner.lastName!, password: input.owner.password }));
     const base = input.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'organisateur';
     const org = await this.create({
-      slug: `${base}-${randomCode(4).toLowerCase()}`, name: input.name, category: input.category, capabilities: ['caravans'], level: input.level ?? 'verifie',
+      slug: `${base}-${randomCode(4).toLowerCase()}`, name: input.name, category: input.category, capabilities: ['caravans'], level: input.level ?? 'nouveau',
       payoutPhone: input.payoutPhone ?? owner.phone,
     });
     await this.setOwner(org._id, phone, null);
@@ -388,6 +388,13 @@ export class OrganizationsService {
     return list.map((m, i) => ({ userId: m.userId.toHexString(), roles: m.roles, firstName: users[i]?.firstName ?? '', lastName: users[i]?.lastName ?? '' }));
   }
 
+  /** Owners and managers of every active organization (businesses, organizers): told of app-wide changes. */
+  async teamLeadIds(): Promise<ObjectId[]> {
+    const active = await this.orgs.distinct('_id', { status: 'active' });
+    if (!active.length) return [];
+    return (await this.members.distinct('userId', { orgId: { $in: active }, status: 'active', roles: { $in: ['owner', 'manager'] } })) as ObjectId[];
+  }
+
   async membershipsForUser(userId: ObjectId): Promise<MembershipSummary[]> {
     const list = await this.members.find({ userId, status: 'active' }).toArray();
     if (!list.length) return [];
@@ -397,7 +404,7 @@ export class OrganizationsService {
       const o = byId.get(m.orgId.toHexString());
       // A space the organization no longer has (capability removed) stays closed.
       if (!o || !spacesOf(o).includes(m.space)) return [];
-      return [{ orgId: o._id.toHexString(), name: o.name, category: o.category, level: o.level, roles: m.roles, capabilities: o.capabilities, space: m.space, logoUrl: o.logo?.url ?? null }];
+      return [{ orgId: o._id.toHexString(), name: o.name, category: o.category, level: shownLevel(o.level, o.stats.tripsCount), roles: m.roles, capabilities: o.capabilities, space: m.space, logoUrl: o.logo?.url ?? null }];
     });
   }
 
@@ -421,7 +428,9 @@ export function orgView(o: OrganizationDoc) {
     name: o.name,
     category: o.category,
     capabilities: o.capabilities,
-    level: o.level,
+    // Shown: given by the team or earned by the trips, the higher. `levelGiven`: what the team set (optional).
+    level: shownLevel(o.level, o.stats.tripsCount),
+    levelGiven: o.level,
     rating: o.stats.ratingAvg,
     trips: o.stats.tripsCount,
     status: o.status,
@@ -439,7 +448,7 @@ export const orgCard = (o: OrganizationDoc): OrgCard => ({
   slug: o.slug,
   name: o.name,
   category: o.category,
-  level: o.level,
+  level: shownLevel(o.level, o.stats.tripsCount),
   rating: o.stats.ratingAvg,
   trips: o.stats.tripsCount,
   logoUrl: o.logo?.url ?? null,

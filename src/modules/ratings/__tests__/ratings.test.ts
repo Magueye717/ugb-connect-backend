@@ -22,7 +22,6 @@ const ok = async (res: Promise<{ statusCode: number; body: string }>, status = 2
   expect(r.statusCode, r.body).toBe(status);
   return json(r);
 };
-const pay = (reference: string) => t.app.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${reference}/pay`, headers: { 'content-type': 'text/plain' }, payload: '' });
 const at = (ms: number) => new Date(T0 + ms).toISOString();
 const pending = async (who: Who) => (await ok(call(who, 'GET', '/me/ratings/pending'))).items as { subject: string; id: string; title: string; ratedName: string }[];
 
@@ -67,8 +66,10 @@ async function completedTrip() {
   );
   await ok(call(o, 'POST', `/org/${orgId}/departures/${draft.id}/publish`));
   const s = await registerStudent(t);
-  const { payment } = await ok(call(s, 'POST', `/caravans/departures/${draft.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1', method: 'wave' }), 201);
-  await pay(payment.reference);
+  // A request, then validated by the organizer (paid in cash).
+  const { booking } = await ok(call(s, 'POST', `/caravans/departures/${draft.id}/bookings`, { pickupStopId: 'p1', dropoffStopId: 'd1' }), 201);
+  const orderId = (await t.c.mongo.db.collection('bookings').findOne({ _id: new ObjectId(booking.id) }))!.orderId.toHexString();
+  await ok(call(o, 'POST', `/org/${orgId}/departures/requests/${orderId}/validate`));
   // Arrived: the trip is over.
   t.clock.set(T0 + 3 * DAY + 6 * HOUR);
   await t.c.mongo.db.collection('departures').updateOne({ _id: new ObjectId(draft.id) }, { $set: { status: 'completed', completedAt: t.clock.now() } });

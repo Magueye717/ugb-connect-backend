@@ -13,7 +13,7 @@ import { authPlugin } from './platform/auth/auth.js';
 import { errors, registerErrorHandling } from './platform/http/errors.js';
 import { registerHealthRoutes } from './platform/observability/health.js';
 import { loggerOptions } from './platform/observability/logger.js';
-import { registerLegalRoutes } from './modules/legal/index.js';
+import { registerLegalPages, registerLegalRoutes } from './modules/legal/index.js';
 import { registerRealtimeGateway } from './platform/realtime/gateway.js';
 
 const REQUEST_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
@@ -65,6 +65,8 @@ export async function buildApp(c: Container, state = { shuttingDown: false }): P
   // Client frames are tiny (auth, sub, unsub): anything bigger is refused by the socket itself.
   await app.register(websocket, { options: { maxPayload: 4096 } });
   registerHealthRoutes(app, { db: c.mongo.db, redis: c.redis, isShuttingDown: () => state.shuttingDown });
+  // The privacy policy and the terms as pages (the store listing links them).
+  registerLegalPages(app, { phone: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL });
 
   const { accounts, organizations, identity, payments, messaging, taxi, ticketing, caravans, notifications, alerts, publicRestos, media, events, banners, lost, commerce, places, ratings } = c.modules;
   await app.register(
@@ -75,7 +77,7 @@ export async function buildApp(c: Container, state = { shuttingDown: false }): P
       registerLegalRoutes(api, { phone: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL });
       api.get('/reference/support', { schema: { tags: ['reference'] } }, async () => ({ phone: c.config.SUPPORT_PHONE, whatsapp: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL, hours: 'Lun.-sam. · 8h-20h' }));
       organizations.registerRoutes(api, accounts.requirePlatformRole('admin'), accounts.requireAnyPlatformRole(['caravan_editor']));
-      payments.registerRoutes(api, accounts.requirePlatformRole('finance'));
+      payments.registerRoutes(api, accounts.requirePlatformRole('finance'), accounts.requirePlatformRole('admin'));
       messaging.registerRoutes(api, accounts.requirePlatformRole('admin'));
       taxi.registerRoutes(api);
       ticketing.registerRoutes(api);

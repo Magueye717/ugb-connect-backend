@@ -11,7 +11,7 @@ import { LATE_CANCEL_FEE, PUBLICATION_FEE } from '../events/index.js';
  * whenever the terms change in substance.
  */
 export const TERMS_VERSION = '2026-11';
-const UPDATED_AT = '2026-11-04';
+const UPDATED_AT = '2026-11-11';
 
 export const LEGAL_DOCS = ['conditions', 'confidentialite'] as const;
 export type LegalDoc = (typeof LEGAL_DOCS)[number];
@@ -112,7 +112,7 @@ function confidentialite(c: Contacts): Section[] {
         'Ton compte : prénom, nom, numéro de téléphone, numéro étudiant, campus, village et chambre si tu les indiques, UFR, région d’origine, photo de profil.',
         'Ta carte étudiant, si tu choisis de la scanner : date et lieu de naissance, nationalité. La photo de la carte sert uniquement à la lecture et n’est jamais conservée.',
         'Ton activité : réservations, billets, commandes, trajets Sunu Taxi, objets déclarés, messages échangés dans l’application, avis.',
-        'Les paiements : montant, opérateur (Wave ou Orange Money) et référence de la transaction. Jamais ton code ni l’accès à ton compte de paiement.',
+        'Les paiements : les achats auprès des restaurants, boutiques et organisateurs se règlent en espèces, en main propre ; l’application enregistre seulement le montant et sa validation. Les frais payés à UGB Connect (publication d’un événement, bannières) passent par Wave ou Orange Money : nous gardons le montant, l’opérateur et la référence de la transaction, jamais ton code ni l’accès à ton compte de paiement.',
         'Ton appareil : un identifiant de notification pour t’envoyer des alertes, et ta position lorsque tu l’autorises (carte du campus, adresse de livraison).',
       ],
     },
@@ -144,6 +144,13 @@ function confidentialite(c: Contacts): Section[] {
       paragraphs: [
         'Tu peux accéder à tes données, les rectifier, t’opposer à certains traitements et demander leur suppression. Une grande partie se modifie directement dans ton profil ; pour le reste, écris-nous.',
         'Tu peux aussi saisir la Commission de Protection des Données Personnelles (CDP) du Sénégal.',
+      ],
+    },
+    {
+      title: 'Supprimer ton compte',
+      paragraphs: [
+        `Écris-nous depuis le numéro de ton compte, par WhatsApp ou SMS au ${c.phone}, ou par e-mail à ${c.email}, en indiquant « Supprimer mon compte ». Nous confirmons la demande, puis le compte est fermé sous 30 jours.`,
+        'Sont supprimés : ton profil, ta photo, ta carte étudiant, tes messages, tes trajets et tes annonces. Sont gardés le temps exigé par la loi, puis supprimés : les traces de paiement et de remboursement. Tes avis restent, anonymes.',
       ],
     },
     {
@@ -184,4 +191,71 @@ export function registerLegalRoutes(root: FastifyInstance, contacts: Contacts) {
       return legalDocument(req.params.doc as LegalDoc, contacts);
     },
   );
+}
+
+// ---- Public pages: the same documents in a browser (store listings, links shared outside the app) ----------------
+
+const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const frDate = (iso: string) => new Date(`${iso}T12:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+const slug = (t: string) =>
+  t
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+/** A legal document as a page readable on a phone, light or dark: its sections, an index, the contacts. */
+export function legalPage(doc: LegalDoc, contacts: Contacts) {
+  const d = legalDocument(doc, contacts);
+  const other: LegalDoc = doc === 'conditions' ? 'confidentialite' : 'conditions';
+  const sections = d.sections
+    .map((s) => `<section id="${slug(s.title)}"><h2>${esc(s.title)}</h2>${s.paragraphs.map((p) => `<p>${esc(p)}</p>`).join('')}</section>`)
+    .join('');
+  const toc = d.sections.map((s) => `<li><a href="#${slug(s.title)}">${esc(s.title)}</a></li>`).join('');
+  return `<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(d.title)} · UGB Connect</title>
+<meta name="description" content="${esc(d.title)} de l’application UGB Connect, pour les étudiants de l’Université Gaston Berger.">
+<style>
+:root{--bg:#f5f7fb;--card:#fff;--text:#1f2a44;--muted:#5b6478;--line:#e3e7ef;--accent:#ff7a1a;--navy:#0a1028;--link:#2f5bea}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1020;--card:#141a2e;--text:#e7ebf5;--muted:#a3abc0;--line:#252d45;--navy:#e7ebf5;--link:#8aa6ff}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.logo{width:40px;height:40px;border-radius:12px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:800}
+.brand{font-weight:700;color:var(--navy)}
+h1{font-size:28px;line-height:1.2;margin:16px 0 4px;color:var(--navy)}
+.meta{color:var(--muted);font-size:14px;margin:0 0 20px}
+nav,section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 18px;margin:12px 0}
+nav strong{display:block;margin-bottom:6px}nav ol{margin:0;padding-left:20px}nav li{margin:2px 0}
+h2{font-size:19px;margin:0 0 8px;color:var(--navy)}p{margin:0 0 10px}p:last-child{margin-bottom:0}
+a{color:var(--link)}footer{color:var(--muted);font-size:14px;margin-top:24px}
+</style></head>
+<body><main>
+<header><div class="logo">U</div><div class="brand">UGB Connect</div></header>
+<h1>${esc(d.title)}</h1>
+<p class="meta">Version ${esc(d.version)} · mise à jour le ${esc(frDate(d.updatedAt))}</p>
+<nav><strong>Sommaire</strong><ol>${toc}</ol></nav>
+${sections}
+<footer>
+<p>Contact : <a href="mailto:${esc(contacts.email)}">${esc(contacts.email)}</a> · ${esc(contacts.phone)}</p>
+<p>Voir aussi : <a href="/${other}">${esc(TITLES[other])}</a></p>
+</footer>
+</main></body></html>`;
+}
+
+/**
+ * The pages, at the root (outside /api/v1): /confidentialite (/privacy), /conditions (/terms), and
+ * /suppression-compte (the privacy policy, at « Supprimer ton compte ») for the store's deletion link.
+ */
+export function registerLegalPages(app: FastifyInstance, contacts: Contacts) {
+  const page = (doc: LegalDoc) => async (_req: unknown, reply: import('fastify').FastifyReply) =>
+    reply.header('cache-control', 'public, max-age=3600').type('text/html; charset=utf-8').send(legalPage(doc, contacts));
+  const hidden = { schema: { hide: true } };
+  app.get('/confidentialite', hidden, page('confidentialite'));
+  app.get('/privacy', hidden, page('confidentialite'));
+  app.get('/conditions', hidden, page('conditions'));
+  app.get('/terms', hidden, page('conditions'));
+  app.get('/suppression-compte', hidden, async (_req, reply) => reply.redirect('/confidentialite#supprimer-ton-compte'));
 }

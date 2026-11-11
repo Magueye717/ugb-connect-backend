@@ -28,6 +28,8 @@ const ok = async (res: Promise<{ statusCode: number; body: string }>, status = 2
 };
 const pay = (reference: string) => t.app.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${reference}/pay`, headers: { 'content-type': 'text/plain' }, payload: '' });
 const at = (ms: number) => new Date(T0 + ms).toISOString();
+/** The organizer validates a request (the cash handed over). */
+const validate = (owner: Who, orgId: string, bookingId: string) => ok(call(owner, 'POST', `/org/${orgId}/events/requests/${bookingId}/validate`));
 
 let seq = 0;
 /** An organization verified for events, its owner, two uploaded pictures, and a published party in 5 days. */
@@ -95,7 +97,7 @@ describe('events', () => {
     expect((await call(s, 'PUT', `/org/${orgId}/events/${e.id}/photos`, { imageIds: [first], fixedCover: false })).statusCode).toBe(404);
   });
 
-  it('several tickets of several types in one payment; the buyer can give the extra ones; places are counted', async () => {
+  it('several tickets of several types in one request; the buyer can give the extra ones; places are counted', async () => {
     const { owner, orgId, body } = await setup();
     const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
     await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
@@ -104,10 +106,11 @@ describe('events', () => {
     const listed = await ok(call(s, 'GET', `/events/${ev.id}`));
     expect(listed).toMatchObject({ salesOpen: true, myTicketsLeft: 4, ticketTypes: [{ name: 'Standard', remaining: 3 }, { name: 'VIP', remaining: 2, description: 'Table et boisson' }] });
 
-    const { booking, payment } = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 2 }, { typeId: vip.typeId, qty: 1 }], method: 'wave' }), 201);
-    expect(payment.amount).toBe(9000);
+    const { booking, payment } = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 2 }, { typeId: vip.typeId, qty: 1 }] }), 201);
+    expect(payment).toBeNull();
+    expect(booking).toMatchObject({ status: 'held', total: 9000 });
     expect(booking.tickets.map((x: { name: string }) => x.name)).toEqual(['Standard', 'Standard', 'VIP']);
-    await pay(payment.reference);
+    await validate(owner, orgId, booking.id);
     const done = await ok(call(s, 'GET', `/events/bookings/${booking.id}`));
     expect(done.status).toBe('confirmed');
     const tickets = (await ok(call(s, 'GET', '/tickets'))).items.filter((x: { kind: string }) => x.kind === 'event_entry');
@@ -129,27 +132,94 @@ describe('events', () => {
 
     // A cancelled ticket goes back on sale.
     const vipTicket = tickets.find((x: { details: { typeName: string } }) => x.details.typeName === 'VIP');
-    expect(await ok(call(s, 'POST', `/tickets/${vipTicket.id}/cancel`))).toEqual({ refundAmount: 5000, fee: 0 });
+    expect(await ok(call(s, 'POST', `/tickets/${vipTicket.id}/cancel`))).toEqual({ refundAmount: 0, fee: 0 });
     expect((await ok(call(s, 'GET', `/events/${ev.id}`))).ticketTypes[1].remaining).toBe(2);
   });
 
-  it('the organizer chooses how to pay; cash at the door: tickets at once, nothing paid in the app', async () => {
+  it('a request of several tickets: each has its own code; one paid and validated, the others keep waiting (then expire alone)', async () => {
     const { owner, orgId, body } = await setup();
-    // Not said: Wave and Orange Money, as before.
-    const classic = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
-    expect(classic.paymentMethods).toEqual(['wave', 'orange_money']);
-    const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, { ...body, paymentMethods: ['cash', 'wave'] }), 201);
+    const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
     await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
-    const s = await registerStudent(t);
-    expect((await ok(call(s, 'GET', `/events/${ev.id}`))).paymentMethods).toEqual(['cash', 'wave']);
     const [std] = ev.ticketTypes;
-    expect(json(await call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 1 }], method: 'orange_money' })).field).toBe('method');
-    const booked = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 2 }], method: 'cash' }), 201);
-    expect(booked.payment).toBeNull();
-    expect(booked.booking.status).toBe('confirmed');
-    const ticket = await ok(call(s, 'GET', `/tickets/${booked.booking.tickets[0].ticketId}`));
-    expect(ticket).toMatchObject({ paidWith: 'cash', cashDue: 2000 });
+    const s = await registerStudent(t);
+    const req = (await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 2 }] }), 201)).booking;
+    const mine = (await ok(call(s, 'GET', `/events/${ev.id}`))).myBooking;
+    expect(mine.units).toHaveLength(2);
+    const [u1, u2] = mine.units;
+    expect(u1.code).toMatch(/^[0-9A-Z]{6}$/);
+    expect(u1.code).not.toBe(u2.code);
+    expect(u1.code).not.toBe(mine.code);
+    // Scanned: one ticket's own code finds the request, that ticket picked.
+    const found = (await ok(call(owner, 'GET', `/org/${orgId}/events/requests/by-code/UGBREQ:${u2.code}`))).request;
+    expect(found).toMatchObject({ id: req.id, matched: u2.id, total: 4000, units: [expect.objectContaining({ id: u1.id }), expect.objectContaining({ id: u2.id })] });
+    // Paid for one: only that ticket is issued; the other still waits, for the rest of the amount.
+    const after = await ok(call(owner, 'POST', `/org/${orgId}/events/requests/${req.id}/validate`, { unitIds: [u2.id] }));
+    expect(after).toMatchObject({ total: 2000, validated: 1, units: [expect.objectContaining({ id: u1.id })] });
+    let view = await ok(call(s, 'GET', `/events/${ev.id}`));
+    expect(view.myTickets).toHaveLength(1);
+    expect(view.myBooking).toMatchObject({ count: 1, total: 2000, units: [expect.objectContaining({ id: u1.id })] });
+    // The validated ticket's code no longer finds anything to validate on its own.
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/events/requests/by-code/${u2.code}`))).request).toBeNull();
+    expect(json(await call(owner, 'POST', `/org/${orgId}/events/requests/${req.id}/validate`, { unitIds: [u2.id] })).code).toBe('TICKET_NOT_WAITING');
+    // Not paid in time: the waiting one expires, the validated one stays valid; its place goes back on sale.
+    t.clock.advance(DAY + 60_000);
+    await t.c.modules.events.processors()['events.sweep']!();
+    view = await ok(call(s, 'GET', `/events/${ev.id}`));
+    expect(view.myBooking).toBeNull();
+    expect(view.myTickets).toHaveLength(1);
+    expect(view.ticketTypes[0].remaining).toBe(2);
+    expect((await ok(call(s, 'GET', `/events/bookings/${req.id}`))).status).toBe('confirmed');
+  });
+
+  it('a request: paid to the organizer in cash, who validates it within 24 h (then nothing to collect at the door); else it expires', async () => {
+    const { owner, orgId, body } = await setup();
+    const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, { ...body, paymentMethods: ['wave'] }), 201);
+    expect(ev.paymentMethods).toEqual(['cash']);
+    await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
+    const [std, vip] = ev.ticketTypes;
+    const s = await registerStudent(t);
+    const req = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: std.typeId, qty: 2 }], method: 'wave' }), 201);
+    expect(req.payment).toBeNull();
     expect(await t.c.mongo.db.collection('payments').countDocuments({ userId: new ObjectId(s.userId) })).toBe(0);
+    const mine = (await ok(call(s, 'GET', `/events/${ev.id}`))).myBooking;
+    expect(mine).toMatchObject({ awaitingValidation: true, total: 4000, count: 2, code: expect.stringMatching(/^[0-9A-Z]{6}$/), organizer: { phone: expect.any(String) } });
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/events/requests/by-code/${mine.code.toLowerCase()}`))).request).toMatchObject({ id: req.booking.id, total: 4000 });
+    expect(new Date(mine.holdExpiresAt).getTime()).toBe(T0 + DAY);
+    expect(json(await call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: vip.typeId, qty: 1 }] })).code).toBe('REQUEST_PENDING');
+    // The organizer is told, and sees who and how much.
+    expect((await ok(call(owner, 'GET', '/notifications'))).items.map((n: { type: string }) => n.type)).toContain('event.request');
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/events/${ev.id}/requests`))).items).toEqual([
+      expect.objectContaining({ id: req.booking.id, total: 4000, tickets: [{ name: 'Standard', qty: 2 }], student: expect.objectContaining({ name: 'Awa Diop' }) }),
+    ]);
+    await validate(owner, orgId, req.booking.id);
+    const ticket = (await ok(call(s, 'GET', '/tickets'))).items.find((x: { kind: string }) => x.kind === 'event_entry');
+    expect(ticket).toMatchObject({ paidWith: 'cash', cashDue: 0, status: 'active' });
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/events/${ev.id}/requests`))).items).toEqual([]);
+
+    // Refused with a reason; another not validated within 24 h: both back on sale.
+    const [a, b] = [await registerStudent(t), await registerStudent(t)];
+    const ra = (await ok(call(a, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: vip.typeId, qty: 1 }] }), 201)).booking;
+    const rb = (await ok(call(b, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: vip.typeId, qty: 1 }] }), 201)).booking;
+    expect((await ok(call(owner, 'GET', `/events/${ev.id}`))).ticketTypes[1].remaining).toBe(0);
+    expect((await call(owner, 'POST', `/org/${orgId}/events/requests/${ra.id}/refuse`, { reason: 'Paiement non reçu' })).statusCode).toBe(204);
+    expect((await ok(call(a, 'GET', '/notifications'))).items[0]).toMatchObject({ type: 'event.request_refused', body: 'Paiement non reçu' });
+    t.clock.advance(DAY + 60_000);
+    await t.c.modules.events.processors()['events.sweep']!();
+    expect((await ok(call(b, 'GET', `/events/bookings/${rb.id}`))).status).toBe('expired');
+    expect((await ok(call(b, 'GET', '/notifications'))).items[0].type).toBe('event.request_expired');
+    expect((await ok(call(owner, 'GET', `/events/${ev.id}`))).ticketTypes[1].remaining).toBe(2);
+  });
+
+  it('three requests waiting at most per student', async () => {
+    const s = await registerStudent(t);
+    for (let i = 0; i < 4; i++) {
+      const { owner, orgId, body } = await setup();
+      const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
+      await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
+      const res = await call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: ev.ticketTypes[0].typeId, qty: 1 }] });
+      if (i < 3) expect(res.statusCode).toBe(201);
+      else expect(json(res).code).toBe('TOO_MANY_REQUESTS');
+    }
   });
 
   it('its organizing team (owner, door staff…) books no ticket for its own event; students do', async () => {
@@ -175,6 +245,30 @@ describe('events', () => {
     expect(tickets.every((x) => x.holderTravels === false)).toBe(true);
   });
 
+  it('for a friend by phone (they paid the organizer): refused if not on UGB Connect; the tickets are theirs at once', async () => {
+    const { owner, orgId, body } = await setup();
+    const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
+    await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
+    const standard = ev.ticketTypes[0].typeId;
+    const order = (friendPhone: string, qty = 2) => call(owner, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: standard, qty }], friendPhone });
+
+    // Not on the system: nothing is held.
+    expect(json(await order('781234599')).code).toBe('FRIEND_NOT_FOUND');
+    expect((await ok(call(owner, 'GET', `/events/${ev.id}`))).ticketTypes[0].remaining).toBe(3);
+    // A student can't order for someone else this way.
+    const friend = await registerStudent(t, { firstName: 'Fatou', lastName: 'Ndiaye' });
+    const stranger = await registerStudent(t);
+    expect(json(await call(stranger, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: standard, qty: 1 }], friendPhone: friend.phone })).code).toBe('FRIEND_ORDER_ORGANIZER');
+
+    const made = await ok(order(friend.phone), 201);
+    expect(made.booking).toMatchObject({ status: 'confirmed', total: 4000 });
+    const tickets = await t.c.mongo.db.collection('tickets').find({ eventId: new ObjectId(ev.id), holderUserId: new ObjectId(friend.userId) }).toArray();
+    expect(tickets).toHaveLength(2);
+    expect(tickets.every((x) => x.paidWith === 'cash' && x.cashCollectedAt)).toBe(true);
+    expect(await t.c.mongo.db.collection('tickets').countDocuments({ eventId: new ObjectId(ev.id), holderUserId: new ObjectId(owner.userId) })).toBe(0);
+    expect((await ok(call(friend, 'GET', '/notifications'))).items.map((n: { type: string }) => n.type)).toContain('event.friend_gift');
+  });
+
   it('a free event issues its tickets at once', async () => {
     const { owner, orgId, body } = await setup({ free: true });
     const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, { ...body, title: 'Conférence IA', category: 'conference' }), 201);
@@ -186,13 +280,13 @@ describe('events', () => {
     expect((await ok(call(s, 'GET', `/events/${ev.id}`))).myTickets).toHaveLength(1);
   });
 
-  it('scanned at the entrance; the attendee list; cancelling the event refunds everyone; claim after the end', async () => {
+  it('scanned at the entrance; the attendee list; cancelling the event tells everyone; nothing to claim (paid in cash)', async () => {
     const { owner, orgId, body } = await setup();
     const ev = await ok(call(owner, 'POST', `/org/${orgId}/events`, body), 201);
     await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/publish`));
     const s = await registerStudent(t);
-    const { payment } = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: ev.ticketTypes[0].typeId, qty: 1 }], method: 'wave' }), 201);
-    await pay(payment.reference);
+    const { booking } = await ok(call(s, 'POST', `/events/${ev.id}/bookings`, { items: [{ typeId: ev.ticketTypes[0].typeId, qty: 1 }] }), 201);
+    await validate(owner, orgId, booking.id);
     const ticket = (await ok(call(s, 'GET', '/tickets'))).items.find((x: { kind: string }) => x.kind === 'event_entry');
 
     expect(await ok(call(owner, 'POST', `/org/${orgId}/admissions`, { qr: ticket.qr }))).toMatchObject({ result: 'rejected', reason: 'too_early' });
@@ -203,17 +297,17 @@ describe('events', () => {
     expect(list.attendees).toEqual([expect.objectContaining({ typeName: 'Standard', name: 'Awa Diop', admitted: true })]);
 
     t.clock.set(T0 + 5 * DAY + 9 * HOUR);
-    const payout = await ok(call(owner, 'POST', `/org/${orgId}/events/${ev.id}/claim`, { method: 'wave' }));
-    expect(payout).toMatchObject({ amount: 2000 });
+    // The cash went to the organizer: the app has nothing to pay out.
+    expect((await call(owner, 'POST', `/org/${orgId}/events/${ev.id}/claim`, { method: 'wave' })).statusCode).toBe(422);
 
     // Another event, cancelled before it starts: refunded.
     const e2 = await setup();
     const ev2 = await ok(call(e2.owner, 'POST', `/org/${e2.orgId}/events`, e2.body), 201);
     await ok(call(e2.owner, 'POST', `/org/${e2.orgId}/events/${ev2.id}/publish`));
     const b = await registerStudent(t);
-    const p2 = await ok(call(b, 'POST', `/events/${ev2.id}/bookings`, { items: [{ typeId: ev2.ticketTypes[1].typeId, qty: 1 }], method: 'wave' }), 201);
-    await pay(p2.payment.reference);
-    expect(await ok(call(e2.owner, 'POST', `/org/${e2.orgId}/events/${ev2.id}/cancel`, { reason: 'Salle indisponible' }))).toEqual({ refunded: 1 });
+    const p2 = await ok(call(b, 'POST', `/events/${ev2.id}/bookings`, { items: [{ typeId: ev2.ticketTypes[1].typeId, qty: 1 }] }), 201);
+    await validate(e2.owner, e2.orgId, p2.booking.id);
+    expect(await ok(call(e2.owner, 'POST', `/org/${e2.orgId}/events/${ev2.id}/cancel`, { reason: 'Salle indisponible' }))).toEqual({ refunded: 0 });
     expect((await ok(call(b, 'GET', '/notifications'))).items[0]).toMatchObject({ title: 'Annulé par l’organisateur : Soirée d’intégration SAT' });
   });
 });
@@ -233,8 +327,10 @@ describe('students’ events', () => {
     };
     const draft = await ok(call(s, 'POST', '/me/events', body), 201);
     expect(draft).toMatchObject({ status: 'draft', organizer: { name: 'Awa Diop', category: 'Étudiant' } });
-    // The student now owns their own organization: the organizer space (scanning, attendees).
-    expect(json(await call(s, 'GET', '/me')).spaces.map((x: { type: string }) => x.type)).toEqual(['student', 'organizer']);
+    // The student now owns their own organization, managed from the student space (« Mes événements »): no organizer space.
+    expect(json(await call(s, 'GET', '/me')).spaces.map((x: { type: string }) => x.type)).toEqual(['student']);
+    // Yet they run its door: the organization's routes accept them (requests by code, scans).
+    expect((await call(s, 'GET', `/org/${draft.organizer.id}/events/requests/by-code/NOPE00`)).statusCode).toBe(200);
 
     const submitted = await ok(call(s, 'POST', `/me/events/${draft.id}/submit`));
     expect(submitted.status).toBe('pending_review');

@@ -1,7 +1,7 @@
 import { Type } from 'typebox';
 
 import { ObjectIdString, PhoneInput } from '../../platform/http/schemas.js';
-import { CampusSchema, RegionInput, UfrInput } from '../accounts/index.js';
+import { CampusSchema, NiveauInput, RegionInput, UfrInput } from '../accounts/index.js';
 
 const Channel = Type.Union([Type.Literal('sms'), Type.Literal('whatsapp'), Type.Literal('email')]);
 const Purpose = Type.Union([Type.Literal('register'), Type.Literal('reset_password'), Type.Literal('change_phone')]);
@@ -47,6 +47,7 @@ export const RegisterBody = Type.Object(
     village: Type.Optional(Type.Union([Type.String({ maxLength: 40 }), Type.Null()])),
     room: Type.Optional(Type.Union([Type.String({ maxLength: 8 }), Type.Null()])),
     ufr: UfrInput,
+    niveau: Type.Optional(NiveauInput),
     region: RegionInput,
     password: Password,
     termsVersion: Type.String({ minLength: 1, maxLength: 20 }),

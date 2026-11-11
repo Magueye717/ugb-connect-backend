@@ -41,7 +41,17 @@ const EventView = Type.Object({
   myTickets: Type.Array(Type.String(), { description: 'My ticket ids for this event.' }),
   myTicketsLeft: Type.Number({ description: 'Tickets I can still buy (maxPerStudent, all orders together).' }),
   organizedByMe: Type.Boolean({ description: 'I am on the organizing team: I may only order for friends (forFriends), otherwise 422 OWN_EVENT.' }),
-  myBooking: Nullable(Type.Object({ id: Type.String(), total: Type.Number(), holdExpiresAt: Type.String(), payment: Nullable(Type.Object({ reference: Type.String(), checkoutUrl: Nullable(Type.String()) })) })),
+  myBooking: Nullable(
+    Type.Object({
+      id: Type.String(), total: Type.Number(), holdExpiresAt: Type.String(), payment: Nullable(Type.Object({ reference: Type.String(), checkoutUrl: Nullable(Type.String()) })),
+      count: Type.Integer({ description: 'Tickets still waiting (a request may be validated one ticket at a time).' }),
+      units: Type.Array(Type.Object({ id: Type.String(), name: Type.String(), price: Type.Number(), code: Nullable(Type.String({ description: 'This ticket’s own request code (UGBREQ:…): paid and validated on its own.' })) })),
+      awaitingValidation: Type.Boolean({ description: 'A request: to pay the organizer in cash, who then validates it (before holdExpiresAt).' }),
+      organizer: Nullable(Type.Object({ name: Type.String(), phone: Type.String() }, { description: 'Who to pay and call about the request.' })),
+      code: Nullable(Type.String({ description: 'The request’s code, shown as a QR code (UGBREQ:…) for the organizer to scan when paid.' })),
+      orderedBy: Nullable(Type.String({ description: 'Ordered for me by an organizer (his name): mine to pay before holdExpiresAt, with POST /events/bookings/:id/pay.' })),
+    }),
+  ),
 });
 const OrgEventView = Type.Object({
   ...Base,
@@ -150,8 +160,11 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
         body: Type.Object(
           {
             items: Type.Array(Type.Object({ typeId: Type.String({ maxLength: 8 }), qty: Type.Integer({ minimum: 0, maximum: 20 }) }, { additionalProperties: false }), { minItems: 1, maxItems: 6 }),
-            method: Type.Enum(TICKET_PAYMENT_METHODS, { description: 'One the event accepts. cash: the tickets are issued at once, paid at the door (payment is null).' }),
+            method: Type.Optional(Type.Enum(TICKET_PAYMENT_METHODS, { description: 'Ignored: tickets are paid to the organizer in cash.' })),
             forFriends: Type.Optional(Type.Boolean({ description: 'Its organizing team orders only so (otherwise 422 OWN_EVENT): every ticket is one to give, none is theirs.' })),
+            friendPhone: Type.Optional(
+              Type.String({ maxLength: 20, description: 'The organizing team orders for this friend (who paid them): the tickets are theirs at once. 422 FRIEND_NOT_FOUND when no account has it: nothing is held.' }),
+            ),
             returnUrl: Type.Optional(Type.String({ maxLength: 300 })),
           },
           { additionalProperties: false },
@@ -254,6 +267,53 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
       return res;
     },
   );
+
+  // ---- Requests: the student pays the organizer in cash, the organizer validates (within 24 h) ---------------------
+
+  const RequestView = Type.Object({
+    id: Type.String(), status: Type.String(), total: Type.Number(), expiresAt: Type.String(), createdAt: Type.String(),
+    tickets: Type.Array(Type.Object({ name: Type.String(), qty: Type.Integer() }), { description: 'The tickets still waiting, per type.' }),
+    student: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })),
+    units: Type.Array(Type.Object({ id: Type.String(), name: Type.String(), price: Type.Number(), code: Nullable(Type.String()) }), { description: 'Each ticket still waiting: validate some (unitIds) or all.' }),
+    validated: Type.Integer({ description: 'Tickets of this request validated already.' }),
+  });
+  // No body (validate all), or the ones paid.
+  const ValidateBody = Nullable(Type.Object({ unitIds: Type.Optional(Type.Array(ObjectIdString, { minItems: 1, maxItems: 20 })) }, { additionalProperties: false }));
+  const RefuseBody = Type.Object({ reason: Type.Optional(Nullable(Type.String({ maxLength: 200 }))) }, { additionalProperties: false });
+  const RequestParams = Type.Object({ orgId: ObjectIdString, bookingId: ObjectIdString }, { additionalProperties: false });
+  const MyRequestParams = Type.Object({ bookingId: ObjectIdString }, { additionalProperties: false });
+
+  app.get('/org/:orgId/events/:id/requests', { ...org(crew), schema: { tags, params: OrgEventParams, response: { 200: Type.Object({ items: Type.Array(RequestView) }) } } }, async (req) => ({
+    items: await service.requests(toObjectId(req.params.orgId), toObjectId(req.params.id)),
+  }));
+  app.post('/org/:orgId/events/requests/:bookingId/validate', { ...org(crew), schema: { tags, params: RequestParams, body: ValidateBody, description: 'Cash received: the tickets are issued, valid and scannable. `unitIds`: only those (paid one by one); all waiting otherwise.', response: { 200: RequestView } } }, async (req) => {
+    const res = await service.validateRequest(toObjectId(req.params.orgId), toObjectId(req.params.bookingId), req.body?.unitIds);
+    await trace(req, 'event.request_validated', req.params.bookingId);
+    return res;
+  });
+  app.post('/org/:orgId/events/requests/:bookingId/refuse', { ...org(crew), schema: { tags, params: RequestParams, body: RefuseBody } }, async (req, reply) => {
+    await service.refuseRequest(toObjectId(req.params.orgId), toObjectId(req.params.bookingId), req.body.reason ?? null);
+    await trace(req, 'event.request_refused', req.params.bookingId);
+    return reply.status(204).send();
+  });
+  app.get(
+    '/org/:orgId/events/requests/by-code/:code',
+    { ...org(crew), schema: { tags, params: Type.Object({ orgId: ObjectIdString, code: Type.String({ maxLength: 40 }) }), response: { 200: Type.Object({ request: Nullable(Type.Object({ ...RequestView.properties, title: Type.String(), matched: Nullable(Type.String({ description: 'The ticket whose own code was given; null: the whole request’s code.' })) })) }) } } },
+    async (req) => ({ request: await service.requestByCode(toObjectId(req.params.orgId), req.params.code) }),
+  );
+  app.get('/me/events/:id/requests', { ...student, schema: { tags, params: IdParams, response: { 200: Type.Object({ items: Type.Array(RequestView) }) } } }, async (req) => ({
+    items: await service.requests(await myOrg(req), toObjectId(req.params.id)),
+  }));
+  app.post('/me/events/requests/:bookingId/validate', { ...student, schema: { tags, params: MyRequestParams, body: ValidateBody, response: { 200: RequestView } } }, async (req) => {
+    const res = await service.validateRequest(await myOrg(req), toObjectId(req.params.bookingId), req.body?.unitIds);
+    await trace(req, 'event.request_validated', req.params.bookingId);
+    return res;
+  });
+  app.post('/me/events/requests/:bookingId/refuse', { ...student, schema: { tags, params: MyRequestParams, body: RefuseBody } }, async (req, reply) => {
+    await service.refuseRequest(await myOrg(req), toObjectId(req.params.bookingId), req.body.reason ?? null);
+    await trace(req, 'event.request_refused', req.params.bookingId);
+    return reply.status(204).send();
+  });
 
   // ---- Admins: the review of students' events --------------------------------------------------------------------
 

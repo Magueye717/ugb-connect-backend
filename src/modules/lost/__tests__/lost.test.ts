@@ -231,8 +231,14 @@ describe('student number given after sign-up', () => {
     expect(json(await put(a, taken.studentNumber)).code).toBe('STUDENT_NUMBER_TAKEN');
     expect((await put(a, 'p 777 001')).statusCode).toBe(204);
     expect((await ok(call(a, 'GET', '/me'))).student.studentNumber).toBe('P777001');
-    // Once set, it doesn't change here.
-    expect(json(await put(a, 'P777002')).code).toBe('STUDENT_NUMBER_SET');
+    // A typo: correctable for 3 days after it was first given…
+    expect((await ok(call(a, 'GET', '/me'))).student.studentNumberEditableUntil).toBeTruthy();
+    expect((await put(a, 'P777002')).statusCode).toBe(204);
+    expect((await ok(call(a, 'GET', '/me'))).student.studentNumber).toBe('P777002');
+    // …then it doesn't change here (the team fixes it). Given 4 days ago (moving the clock would end the session).
+    await t.c.mongo.db.collection('studentProfiles').updateOne({ studentNumber: 'P777002' }, { $set: { studentNumberSetAt: new Date(t.clock.now().getTime() - 4 * 24 * 3_600_000) } });
+    expect((await ok(call(a, 'GET', '/me'))).student.studentNumberEditableUntil).toBeNull();
+    expect(json(await put(a, 'P777003')).code).toBe('STUDENT_NUMBER_SET');
 
     // Their own card gives the number: free → saved; someone else's → refused.
     const card = multipart(await picture());

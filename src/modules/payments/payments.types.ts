@@ -105,6 +105,19 @@ export type PurposeHandler = {
   onClosed(payment: PaymentDoc, session: ClientSession): Promise<void>;
 };
 
+/**
+ * The admins' switch for each provider, app-wide (one document, `_id: 'methods'`). A method listed in `off` takes no
+ * payment until switched back on: cash keeps working.
+ */
+export type PaymentSettingsDoc = {
+  _id: 'methods';
+  off: Partial<Record<PaymentMethod, { since: Date; by: ObjectId; note: string | null }>>;
+  updatedAt: Date;
+};
+
+/** What the app shows: each method, and since when it's off (with the admins' note). */
+export type MethodStatus = { method: PaymentMethod; available: boolean; offSince: string | null; note: string | null };
+
 export type NewPayout = {
   kind: PayoutDoc['kind'];
   beneficiaryUserId: ObjectId;

@@ -19,7 +19,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "seed:shop-images": "tsx --env-file=.env scripts/seed/shop-images.ts",
+    "seed:review-user": "tsx --env-file=.env scripts/seed/review-user.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",

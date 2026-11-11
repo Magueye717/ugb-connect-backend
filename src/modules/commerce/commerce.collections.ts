@@ -162,4 +162,11 @@ export const commerceMigrations: DataMigration[] = [
       await db.collection('catalogItems').updateMany({ likes: { $exists: false } }, { $set: { likes: 0 } });
     },
   },
+  {
+    id: '2026-11-11-orders-cash-only',
+    description: 'Orders are paid in cash only (Wave and Orange Money are for UGB Connect’s own fees): every business takes cash.',
+    async up(db) {
+      await db.collection('businesses').updateMany({}, { $set: { paymentMethods: ['cash'], onlinePayments: false } });
+    },
+  },
 ];

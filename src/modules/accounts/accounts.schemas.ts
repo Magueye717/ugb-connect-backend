@@ -1,7 +1,7 @@
 import { Type } from 'typebox';
 
 import { Nullable, PhoneInput } from '../../platform/http/schemas.js';
-import { CAMPUSES, PLATFORM_ROLES, REGIONS, UFR_CODES } from './accounts.types.js';
+import { NIVEAUX, CAMPUSES, PLATFORM_ROLES, REGIONS, UFR_CODES } from './accounts.types.js';
 
 
 export const MeResponse = Type.Object({
@@ -31,6 +31,8 @@ export const MeResponse = Type.Object({
       ),
       originEditableFrom: Nullable(Type.String({ description: 'UFR and region given this academic year: the filled ones change from this date (the next rentrée). Null: free to change.' })),
       identityEditableFrom: Nullable(Type.String({ description: 'Card details saved this academic year: the filled ones change from this date (the next rentrée). Null: free to change.' })),
+      studentNumberEditableUntil: Nullable(Type.String({ description: 'The student number can still be corrected until then (3 days after it was first given). Null: locked, or none.' })),
+      identityEditableUntil: Nullable(Type.String({ description: 'Card details typed by hand: correctable until then (3 days after first given). Null: locked, from the card, or none.' })),
     }),
   ),
   /** Drives AuthContext.spaces in the app. */
@@ -84,7 +86,9 @@ export const ResidenceBody = Type.Object(
 
 export const UfrInput = Type.Union(UFR_CODES.map((c) => Type.Literal(c)), { description: 'UFR code: GET /reference/student.' });
 export const RegionInput = Type.Union(REGIONS.map((r) => Type.Literal(r)), { description: 'Home region: GET /reference/student.' });
-export const OriginBody = Type.Object({ ufr: UfrInput, region: RegionInput }, { additionalProperties: false });
+export const NiveauInput = Type.Union(NIVEAUX.map((n) => Type.Literal(n)), { description: 'Year of study.' });
+/** Each one alone (« Mon UFR et mon niveau », the région on « Ma carte étudiant »): what isn't sent stays. */
+export const OriginBody = Type.Object({ ufr: Type.Optional(UfrInput), region: Type.Optional(RegionInput), niveau: Type.Optional(NiveauInput) }, { additionalProperties: false, minProperties: 1 });
 
 export const StudentReference = Type.Object({
   campuses: Type.Array(Type.Object({ key: Type.String(), label: Type.String(), villages: Type.Array(Type.String()) })),

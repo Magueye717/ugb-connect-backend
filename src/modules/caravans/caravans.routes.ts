@@ -48,8 +48,12 @@ const DepartureView = Type.Object({
       id: Type.String(),
       seat: Type.Number(),
       holdExpiresAt: Type.String(),
-      seats: Type.Array(Type.Object({ seat: Type.Number(), passenger: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })) })),
+      seats: Type.Array(Type.Object({ id: Type.String(), seat: Type.Number(), price: Type.Number(), code: Nullable(Type.String({ description: 'This seat’s own request code (UGBREQ:…): paid and validated on its own.' })), passenger: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })) })),
       payment: Nullable(Type.Object({ reference: Type.String(), checkoutUrl: Nullable(Type.String()) })),
+      awaitingValidation: Type.Boolean({ description: 'A request: to pay the organizer in cash, who then validates it (before holdExpiresAt).' }),
+      organizer: Nullable(Type.Object({ name: Type.String(), phone: Type.String() }, { description: 'Who to pay and call about the request.' })),
+      code: Nullable(Type.String({ description: 'The request’s code, shown as a QR code (UGBREQ:…) for the organizer to scan when paid.' })),
+      total: Type.Number(),
     }),
   ),
 });
@@ -197,6 +201,8 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
                         { additionalProperties: false, description: 'A companion (no account needed). Omit for my own seat (one at most).' },
                       ),
                     ),
+                    pickupStopId: Type.Optional(Type.String({ maxLength: 20, description: 'A companion boarding elsewhere (default: the booking’s).' })),
+                    dropoffStopId: Type.Optional(Type.String({ maxLength: 20, description: 'A companion getting off elsewhere (default: the booking’s).' })),
                   },
                   { additionalProperties: false },
                 ),
@@ -205,7 +211,7 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
             ),
             pickupStopId: Type.String({ maxLength: 20 }),
             dropoffStopId: Type.String({ maxLength: 20 }),
-            method: Type.Enum(TICKET_PAYMENT_METHODS, { description: 'One the departure accepts. cash: the seats are booked at once, paid at boarding (payment is null).' }),
+            method: Type.Optional(Type.Enum(TICKET_PAYMENT_METHODS, { description: 'Ignored: seats are paid to the organizer in cash, who then validates the request.' })),
             returnUrl: Type.Optional(Type.String({ maxLength: 300 })),
           },
           { additionalProperties: false },
@@ -445,6 +451,42 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
       const res = await service.cancelDeparture(toObjectId(req.params.orgId), toObjectId(req.params.id), 'organizer', req.body.reason);
       await audit.record({ actor: { type: 'user', id: actorOf(req).userId }, action: 'departure.cancel', target: { type: 'departure', id: req.params.id }, requestId: req.id, metadata: { reason: req.body.reason, ...res } });
       return res;
+    },
+  );
+
+  // ---- Requests: the student pays the organizer in cash, the organizer validates (within 24 h) ---------------------
+
+  const RequestView = Type.Object({
+    id: Type.String({ description: 'The order: its seats waiting are validated all together, or some (bookingIds); refused together.' }), status: Type.String(), total: Type.Number(), expiresAt: Type.String(), createdAt: Type.String(),
+    student: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })),
+    seats: Type.Array(Type.Object({ id: Type.String(), seat: Type.Number(), price: Type.Number(), code: Nullable(Type.String()), passenger: Nullable(Type.String()), pickup: Type.String(), dropoff: Type.String() })),
+  });
+  // No body (validate all), or the ones paid.
+  const ValidateBody = Nullable(Type.Object({ bookingIds: Type.Optional(Type.Array(ObjectIdString, { minItems: 1, maxItems: 20 })) }, { additionalProperties: false }));
+  const RequestParams = Type.Object({ orgId: ObjectIdString, orderId: ObjectIdString }, { additionalProperties: false });
+  const trace = (req: FastifyRequest<{ Params: { orderId: string } }>, action: string) =>
+    audit.record({ actor: { type: 'user', id: actorOf(req).userId }, action, target: { type: 'caravan_order', id: req.params.orderId }, requestId: req.id });
+
+  app.get('/org/:orgId/departures/:id/requests', { ...org(crew), schema: { tags: orgTags, params: OrgDepParams, response: { 200: Type.Object({ items: Type.Array(RequestView) }) } } }, async (req) => ({
+    items: await service.requests(toObjectId(req.params.orgId), toObjectId(req.params.id)),
+  }));
+  app.get(
+    '/org/:orgId/departures/requests/by-code/:code',
+    { ...org(crew), schema: { tags: orgTags, params: Type.Object({ orgId: ObjectIdString, code: Type.String({ maxLength: 40 }) }), response: { 200: Type.Object({ request: Nullable(Type.Object({ ...RequestView.properties, title: Type.String(), matched: Nullable(Type.String({ description: 'The seat whose own code was given; null: the whole request’s code.' })) })) }) } } },
+    async (req) => ({ request: await service.requestByCode(toObjectId(req.params.orgId), req.params.code) }),
+  );
+  app.post('/org/:orgId/departures/requests/:orderId/validate', { ...org(crew), schema: { tags: orgTags, params: RequestParams, body: ValidateBody, description: 'Cash received: the seats’ tickets are issued, valid and scannable. `bookingIds`: only those seats; all waiting otherwise.', response: { 200: RequestView } } }, async (req) => {
+    const res = await service.validateRequest(toObjectId(req.params.orgId), toObjectId(req.params.orderId), req.body?.bookingIds);
+    await trace(req, 'caravan.request_validated');
+    return res;
+  });
+  app.post(
+    '/org/:orgId/departures/requests/:orderId/refuse',
+    { ...org(crew), schema: { tags: orgTags, params: RequestParams, body: Type.Object({ reason: Type.Optional(Nullable(Type.String({ maxLength: 200 }))) }, { additionalProperties: false }) } },
+    async (req, reply) => {
+      await service.refuseRequest(toObjectId(req.params.orgId), toObjectId(req.params.orderId), req.body.reason ?? null);
+      await trace(req, 'caravan.request_refused');
+      return reply.status(204).send();
     },
   );
 }

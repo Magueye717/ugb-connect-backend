@@ -88,7 +88,7 @@ export class BannersService {
    */
   async create(ownerId: ObjectId, input: NewBanner, baseUrl: string) {
     await this.limiter.hit(`banner-create:${ownerId.toHexString()}`, { limit: 10, windowS: 3600 });
-    this.payments.assertAvailable(input.method);
+    await this.payments.assertAvailable(input.method);
     const returnUrl = this.payments.validateReturnUrl(input.returnUrl);
     const pkg = await this.packages.findOne({ code: input.packageCode, active: true });
     if (!pkg) throw errors.validation('Choisis une formule.', { field: 'packageCode' });

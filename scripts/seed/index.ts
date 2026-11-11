@@ -210,8 +210,9 @@ try {
       const buyers: string[] = [];
       for (const [phone, pi, di] of d.tickets ?? []) {
         const u = (await accounts.findByPhone(normalizePhone(phone)!))!;
-        const { payment } = await caravans.book(u._id, created._id, { pickupStopId: `p${pi + 1}`, dropoffStopId: `d${di + 1}`, method: 'wave' }, `http://localhost:${config.PORT}`);
-        if (payment) await caravanApp.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${payment.reference}/pay`, headers: { 'content-type': 'text/plain' }, payload: '' });
+        // A request, then validated by the organizer (the cash handed over).
+        const { booking } = await caravans.book(u._id, created._id, { pickupStopId: `p${pi + 1}`, dropoffStopId: `d${di + 1}` });
+        await caravans.validateRequest(orgId, booking.orderId);
         buyers.push(u.firstName);
       }
       log(`${d.from} → ${d.to} in ${Math.round(d.inMinutes / 60)} h · ${vehicle.plate}${buyers.length ? ` · tickets: ${buyers.join(', ')}` : ''}`);

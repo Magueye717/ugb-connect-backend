@@ -20,7 +20,12 @@ export const ORDER_PAYMENT_METHODS = ['cash', ...PAYMENT_METHODS] as const;
 export type OrderPaymentMethod = (typeof ORDER_PAYMENT_METHODS)[number];
 export const ORDER_PAYMENT_LABELS: Record<OrderPaymentMethod, string> = { cash: 'Espèces', wave: 'Wave', orange_money: 'Orange Money' };
 /** A business's methods until its owner changes them: online only (cash is the owner's choice). */
-export const DEFAULT_PAYMENT_METHODS: OrderPaymentMethod[] = ['wave', 'orange_money'];
+/** Orders are paid in cash, at the delivery or the counter: Wave and Orange Money are only for UGB Connect's own fees. */
+export const DEFAULT_PAYMENT_METHODS: OrderPaymentMethod[] = ['cash'];
+/** A student absent at the delivery or the counter this many times within NO_SHOW_WINDOW_D can't order for NO_SHOW_BLOCK_D. */
+export const NO_SHOW_LIMIT = 3;
+export const NO_SHOW_WINDOW_D = 30;
+export const NO_SHOW_BLOCK_D = 7;
 /** Paid through Wave or Orange Money: only for a business the team has verified. */
 export const ONLINE_PAYMENT_METHODS: OrderPaymentMethod[] = ['wave', 'orange_money'];
 export const onlinePaymentsAllowed = (b: Pick<BusinessDoc, 'onlinePayments' | 'byStudent'>) => b.onlinePayments ?? !b.byStudent;
@@ -102,8 +107,13 @@ export type CatalogItemDoc = {
   photos: ImageRef[];
   /** Shops: units left (orders take them, refusals give them back); null: not counted. */
   stock: number | null;
-  /** Shown and orderable today. */
+  /** Shown and orderable today (the « indisponible aujourd’hui » switch). */
   available: boolean;
+  /**
+   * A restaurant's weekly menu: the days it's served, 1 (lundi) to 7 (dimanche). Absent or null: every day. Students
+   * only see, and order, today's.
+   */
+  days?: number[] | null;
   /**
    * False: shown for information only (a service done on the spot: "Impression · 25 F la page"), never in an order.
    * Such an item has no stock.
@@ -116,6 +126,11 @@ export type CatalogItemDoc = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+/** Today, 1 (lundi) to 7 (dimanche), in Dakar (UTC). */
+export const isoDay = (now: Date) => ((now.getUTCDay() + 6) % 7) + 1;
+/** The catalog query for what's served today: every day, or today among its days. */
+export const servedOn = (day: number) => ({ $or: [{ days: null }, { days: day }] });
 
 /** Students like a shop's articles; a restaurant's dishes have no heart. */
 export const LIKEABLE_KINDS: readonly BusinessKind[] = ['shop'];
@@ -162,6 +177,8 @@ export type OrderDoc = {
   paymentId: ObjectId | null;
   status: OrderStatus;
   /** Every step, oldest first. */
+  /** The student never came (« Client absent »): cancelled by the business, counted against them. */
+  noShowAt?: Date | null;
   history: { status: OrderStatus; at: Date; by: ObjectId | null }[];
   refusal: string | null;
   payoutId: ObjectId | null;

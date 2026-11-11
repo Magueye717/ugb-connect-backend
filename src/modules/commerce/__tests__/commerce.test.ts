@@ -20,7 +20,6 @@ const ok = async (res: Promise<{ statusCode: number; body: string }>, status = 2
   expect(r.statusCode, r.body).toBe(status);
   return json(r);
 };
-const pay = (reference: string) => t.app.inject({ method: 'POST', url: `/api/v1/dev/payment-simulator/${reference}/pay`, headers: { 'content-type': 'text/plain' }, payload: '' });
 const types = async (who: Who) => (await ok(call(who, 'GET', '/notifications'))).items.map((n: { type: string }) => n.type);
 
 /** A business created by an admin, open all day (the test clock is 10:00 in Dakar). */
@@ -64,7 +63,7 @@ describe('restaurants', () => {
     expect((await ok(call(s, 'GET', `/businesses/${b.id}`))).items.map((i: { name: string }) => i.name)).toEqual(['Bissap', 'Mafé yap']);
   });
 
-  it('an order: paid, the team notified; accepted, ready, completed (paid out); another refused (refunded)', async () => {
+  it('an order: placed (cash), the team notified; accepted, ready, completed (no payout); another refused', async () => {
     const { b, owner, orgId, sp } = await business('restaurant');
     const staff = await createStaff(t);
     await call(owner, 'PUT', `/org/${orgId}/${sp}/members`, { phone: staff.phone, roles: ['staff'] });
@@ -72,18 +71,17 @@ describe('restaurants', () => {
     const bissap = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'drink', name: 'Bissap', price: 300 }), 201);
     const s = await registerStudent(t);
 
-    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', method: 'wave' })).field).toBe('zone');
+    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', method: 'cash' })).field).toBe('zone');
     // No delivery outside the campus for this one: refused, with the reason.
-    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', zone: 'outside', address: 'Sanar', method: 'wave' })).field).toBe('zone');
-    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', zone: 'campus1', method: 'wave' })).field).toBe('address');
+    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', zone: 'outside', address: 'Sanar', method: 'cash' })).field).toBe('zone');
+    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'delivery', zone: 'campus1', method: 'cash' })).field).toBe('address');
     const { order, payment } = await ok(
-      call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 2 }, { itemId: bissap.id, qty: 1 }], mode: 'delivery', zone: 'campus1', address: 'Village E, chambre 214', method: 'wave' }),
+      call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 2 }, { itemId: bissap.id, qty: 1 }], mode: 'delivery', zone: 'campus1', address: 'Village E, chambre 214', method: 'cash' }),
       201,
     );
-    expect(order).toMatchObject({ status: 'pending_payment', subtotal: 3300, deliveryFee: 200, total: 3500, payment: { reference: payment.reference } });
-    // Not paid yet: the business doesn't see it.
-    expect((await ok(call(owner, 'GET', `/org/${orgId}/${sp}/orders`))).items).toEqual([]);
-    await pay(payment.reference);
+    // Paid in cash at the delivery: straight to the business.
+    expect(payment).toBeNull();
+    expect(order).toMatchObject({ status: 'placed', method: 'cash', subtotal: 3300, deliveryFee: 200, total: 3500, payment: null });
     const queue = (await ok(call(staff, 'GET', `/org/${orgId}/${sp}/orders`))).items;
     expect(queue[0]).toMatchObject({ id: order.id, status: 'placed', customer: { name: 'Awa Diop' }, address: 'Village E, chambre 214' });
     // Each line with its item's picture (none here).
@@ -104,26 +102,23 @@ describe('restaurants', () => {
     expect(await types(s)).toEqual(expect.arrayContaining(['commerce.order_accepted', 'commerce.order_ready']));
     expect(json(await call(staff, 'POST', `/org/${orgId}/${sp}/orders/${order.id}/ready`)).code).toBe('ORDER_STEP');
     await ok(call(staff, 'POST', `/org/${orgId}/${sp}/orders/${order.id}/complete`));
-    const done = await t.c.mongo.db.collection('commerceOrders').findOne({ _id: new ObjectId(order.id as string) });
-    const payout = await t.c.mongo.db.collection('payouts').findOne({ _id: done!.payoutId });
-    expect(payout).toMatchObject({ kind: 'organizer_claim', amount: 3500, reason: 'order_payout' });
-    expect((await ok(call(s, 'GET', `/me/orders/${order.id}`))).history.map((h: { status: string }) => h.status)).toEqual(['pending_payment', 'placed', 'accepted', 'ready', 'completed']);
+    // Paid by hand: nothing for the app to pay out.
+    expect(await t.c.mongo.db.collection('commerceOrders').findOne({ _id: new ObjectId(order.id as string) })).toMatchObject({ payoutId: null });
+    expect((await ok(call(s, 'GET', `/me/orders/${order.id}`))).history.map((h: { status: string }) => h.status)).toEqual(['placed', 'accepted', 'ready', 'completed']);
     expect(await types(s)).toContain('commerce.order_completed');
 
     // Picked up at the counter: the code given (or its QR scanned) hands it over.
-    const pickup = await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'wave' }), 201);
-    await pay(pickup.payment.reference);
+    const pickup = await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'cash' }), 201);
     expect(json(await call(staff, 'POST', `/org/${orgId}/${sp}/orders/handover`, { code: pickup.order.code })).code).toBe('ORDER_NOT_ACCEPTED');
     await ok(call(staff, 'POST', `/org/${orgId}/${sp}/orders/${pickup.order.id}/accept`));
     expect(await ok(call(staff, 'POST', `/org/${orgId}/${sp}/orders/handover`, { code: `UGBCMD:${pickup.order.code.toLowerCase()}` }))).toMatchObject({ id: pickup.order.id, status: 'completed' });
     expect(json(await call(staff, 'POST', `/org/${orgId}/${sp}/orders/handover`, { code: pickup.order.code })).code).toBe('ORDER_ALREADY_DONE');
     expect((await call(staff, 'POST', `/org/${orgId}/${sp}/orders/handover`, { code: 'CZZZZZZ' })).statusCode).toBe(404);
 
-    // Refused: refunded, with the reason.
-    const second = await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'wave' }), 201);
-    await pay(second.payment.reference);
+    // Refused, with the reason (nothing was paid yet: nothing to refund).
+    const second = await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'cash' }), 201);
     const refused = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${second.order.id}/refuse`, { reason: 'Plus de mafé ce soir.' }));
-    expect(refused).toMatchObject({ status: 'refused', refusal: 'Plus de mafé ce soir.', refunded: true });
+    expect(refused).toMatchObject({ status: 'refused', refusal: 'Plus de mafé ce soir.', refunded: false });
     expect(await types(s)).toContain('commerce.order_refused');
     // Other businesses can't touch it.
     const other = await business('restaurant');
@@ -135,7 +130,7 @@ describe('restaurants', () => {
     const mafe = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'menu', name: 'Mafé', price: 1500 }), 201);
     const s = await registerStudent(t);
     expect(await ok(call(s, 'GET', `/businesses/${b.id}`))).toMatchObject({ open: false, statusLabel: 'Fermé · ouvre à 12h', hours: '12h-15h · 19h-22h' });
-    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'wave' })).code).toBe('BUSINESS_CLOSED');
+    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'cash' })).code).toBe('BUSINESS_CLOSED');
     t.clock.set(T0 + 3 * 3_600_000); // 13:00
     await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { acceptingOrders: false }));
     expect(await ok(call(s, 'GET', `/businesses/${b.id}`))).toMatchObject({ open: false, statusLabel: 'Commandes en pause' });
@@ -143,17 +138,16 @@ describe('restaurants', () => {
 });
 
 describe('payment methods', () => {
-  it('a business accepts cash: the order goes straight to it, paid by hand (no refund, no payout); only the methods it accepts', async () => {
+  it('cash only: Wave / Orange Money refused (UGB Connect’s own fees only); paid by hand (no refund, no payout)', async () => {
     const { b, owner, orgId, sp, admin } = await business('restaurant');
-    expect(b.paymentMethods.map((m: { value: string }) => m.value)).toEqual(['wave', 'orange_money']);
-    expect((await call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { paymentMethods: [] })).statusCode).toBe(400);
-    const set = await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { paymentMethods: ['wave', 'cash'] }));
-    expect(set.paymentMethods).toEqual([{ value: 'cash', label: 'Espèces' }, { value: 'wave', label: 'Wave' }]);
+    expect(b.paymentMethods.map((m: { value: string }) => m.value)).toEqual(['cash']);
+    // Whatever the owner asks: cash.
+    expect((await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { paymentMethods: ['wave', 'cash'] }))).paymentMethods).toEqual([{ value: 'cash', label: 'Espèces' }]);
     const mafe = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'menu', name: 'Mafé yap', price: 1500 }), 201);
     const s = await registerStudent(t);
     const line = { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup' };
 
-    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { ...line, method: 'orange_money' })).field).toBe('method');
+    expect(json(await call(s, 'POST', `/businesses/${b.id}/orders`, { ...line, method: 'wave' })).field).toBe('method');
     const first = await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { ...line, method: 'cash' }), 201);
     expect(first.payment).toBeNull();
     expect(first.order).toMatchObject({ status: 'placed', method: 'cash', methodLabel: 'Espèces', payment: null });
@@ -164,20 +158,41 @@ describe('payment methods', () => {
 
     const second = (await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { ...line, method: 'cash' }), 201)).order;
     for (const step of ['accept', 'ready', 'complete']) await ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${second.id}/${step}`));
-    // Served and paid by hand: no payout for this one.
     const doc = await t.c.mongo.db.collection('commerceOrders').findOne({ _id: new ObjectId(second.id) });
     expect(doc).toMatchObject({ status: 'completed', method: 'cash', payoutId: null, refundPayoutId: null });
 
-    // Référencement sets them at creation, with several opening slots.
+    // Référencement too: cash, with several opening slots.
     const created = await ok(
       call(admin, 'POST', '/admin/businesses', {
         kind: 'shop', name: 'Kiosque Cash', specialties: ['Épicerie'], owner: { phone: nextPhone(), firstName: 'Ibou', lastName: 'Ndiaye' },
-        paymentMethods: ['cash'], services: [{ start: '18:00', end: '22:00' }, { start: '08:00', end: '12:00' }],
+        paymentMethods: ['wave'], services: [{ start: '18:00', end: '22:00' }, { start: '08:00', end: '12:00' }],
       }),
       201,
     );
     expect(created.paymentMethods).toEqual([{ value: 'cash', label: 'Espèces' }]);
     expect(created.services).toEqual([{ start: '08:00', end: '12:00' }, { start: '18:00', end: '22:00' }]);
+  });
+
+  it('« client absent »: the order is cancelled and counted; 3 within 30 days and the student can’t order for 7 days', async () => {
+    const { b, owner, orgId, sp } = await business('restaurant');
+    const mafe = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'menu', name: 'Mafé yap', price: 1500 }), 201);
+    const s = await registerStudent(t);
+    const place = () => call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: mafe.id, qty: 1 }], mode: 'pickup', method: 'cash' });
+    const absent = async () => {
+      const { order } = await ok(place(), 201);
+      // Only once taken (accepted or ready).
+      expect(json(await call(owner, 'POST', `/org/${orgId}/${sp}/orders/${order.id}/no-show`)).code).toBe('ORDER_STEP');
+      await ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${order.id}/accept`));
+      return ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${order.id}/no-show`));
+    };
+    expect(await absent()).toMatchObject({ status: 'cancelled', refusal: 'Client absent', noShow: true });
+    expect((await ok(call(s, 'GET', '/notifications'))).items[0]).toMatchObject({ type: 'commerce.order_no_show', body: expect.stringContaining('Avertissement 1/3') });
+    await absent();
+    await absent();
+    const blocked = await place();
+    expect(json(blocked).code).toBe('NO_SHOW_BLOCKED');
+    t.clock.advance(7 * 24 * 3_600_000 + 60_000);
+    await ok(place(), 201);
   });
 });
 
@@ -187,15 +202,14 @@ describe('shops', () => {
     const pen = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'article', category: 'Fournitures', name: 'Stylo bleu', price: 200, stock: 2 }), 201);
     const a = await registerStudent(t);
     const c = await registerStudent(t);
-    const first = await ok(call(a, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 2 }], mode: 'pickup', method: 'wave' }), 201);
-    expect(json(await call(c, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 1 }], mode: 'pickup', method: 'wave' })).code).toBe('OUT_OF_STOCK');
+    const first = await ok(call(a, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 2 }], mode: 'pickup', method: 'cash' }), 201);
+    expect(json(await call(c, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 1 }], mode: 'pickup', method: 'cash' })).code).toBe('OUT_OF_STOCK');
     expect((await ok(call(c, 'GET', `/businesses/${b.id}`))).items[0]).toMatchObject({ stock: 0, soldOut: true });
-    // Paid then cancelled before the shop takes it: refunded, the stock comes back.
-    await pay(first.payment.reference);
-    expect(await ok(call(a, 'POST', `/me/orders/${first.order.id}/cancel`))).toMatchObject({ status: 'cancelled', refunded: true });
+    // Cancelled before the shop takes it: the stock comes back.
+    expect(await ok(call(a, 'POST', `/me/orders/${first.order.id}/cancel`))).toMatchObject({ status: 'cancelled', refunded: false });
     expect(await types(owner)).toContain('commerce.order_cancelled');
     expect((await ok(call(c, 'GET', `/businesses/${b.id}`))).items[0].stock).toBe(2);
-    await ok(call(c, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 1 }], mode: 'pickup', method: 'wave' }), 201);
+    await ok(call(c, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: pen.id, qty: 1 }], mode: 'pickup', method: 'cash' }), 201);
     // The market: every shop's articles together, each with its shop.
     const market = await ok(call(c, 'GET', '/market?kind=shop'));
     expect(market.businesses.some((x: { id: string }) => x.id === b.id)).toBe(true);
@@ -212,11 +226,11 @@ describe('shops', () => {
     expect(print).toMatchObject({ orderable: false, stock: null, soldOut: false });
     const s = await registerStudent(t);
     expect((await ok(call(s, 'GET', `/businesses/${b.id}`))).items.find((i: { id: string }) => i.id === print.id)).toMatchObject({ name: 'Impression', price: 25, orderable: false });
-    const refused = await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: print.id, qty: 1 }], mode: 'pickup', method: 'wave' });
+    const refused = await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: print.id, qty: 1 }], mode: 'pickup', method: 'cash' });
     expect([refused.statusCode, json(refused).code]).toEqual([422, 'ITEM_NOT_ORDERABLE']);
     // Made orderable again: it can be ordered.
     expect(await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/catalog/${print.id}`, { orderable: true }))).toMatchObject({ orderable: true });
-    await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: print.id, qty: 1 }], mode: 'pickup', method: 'wave' }), 201);
+    await ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: print.id, qty: 1 }], mode: 'pickup', method: 'cash' }), 201);
   });
 
   it('a restaurant is « dès » its cheapest dish, never a drink', async () => {
@@ -491,9 +505,9 @@ describe('student shops', () => {
     const buyer = await registerStudent(t);
     const market = await ok(call(buyer, 'GET', '/market?kind=shop'));
     expect(market.items.some((i: { name: string; businessId: string }) => i.name === 'Tresses africaines' && i.businessId === shop.id)).toBe(true);
-    // Organizing an event later keeps the shop and opens the organizer space too.
+    // Organizing an event later keeps the shop; the events stay in the student space (no organizer space).
     await t.c.modules.events.service.personalOrgOf(new ObjectId(s.userId), true);
-    expect((await ok(call(s, 'GET', '/me'))).spaces.map((x: { type: string }) => x.type)).toEqual(['student', 'organizer', 'business']);
+    expect((await ok(call(s, 'GET', '/me'))).spaces.map((x: { type: string }) => x.type)).toEqual(['student', 'business']);
   });
 
   it('only students open a shop this way', async () => {
@@ -535,19 +549,11 @@ describe('article photos', () => {
 });
 
 describe('student shops and owners', () => {
-  it('a student shop takes cash only until the team verifies it', async () => {
+  it('a student shop takes cash, like every business', async () => {
     const s = await registerStudent(t);
     const shop = await ok(call(s, 'POST', '/me/shop', { name: 'Tresses de Awa', specialties: ['Services'] }), 201);
-    expect(shop).toMatchObject({ onlinePayments: false, paymentMethods: [{ value: 'cash', label: 'Espèces' }] });
-    expect(json(await call(s, 'PATCH', `/org/${shop.orgId}/shop/business`, { paymentMethods: ['cash', 'wave'] }))).toMatchObject({ code: 'ONLINE_PAYMENTS_LOCKED' });
-
-    // Verified by the team: Wave and Orange Money open; closed again, they go and cash stays.
-    const admin = await createStaff(t, ['admin']);
-    expect((await ok(call(admin, 'PATCH', `/admin/businesses/${shop.id}`, { onlinePayments: true }))).onlinePayments).toBe(true);
-    const paid = await ok(call(s, 'PATCH', `/org/${shop.orgId}/shop/business`, { paymentMethods: ['wave'] }));
-    expect(paid.paymentMethods).toEqual([{ value: 'wave', label: 'Wave' }]);
-    const closed = await ok(call(admin, 'PATCH', `/admin/businesses/${shop.id}`, { onlinePayments: false }));
-    expect(closed).toMatchObject({ onlinePayments: false, paymentMethods: [{ value: 'cash', label: 'Espèces' }] });
+    expect(shop).toMatchObject({ paymentMethods: [{ value: 'cash', label: 'Espèces' }] });
+    expect((await ok(call(s, 'PATCH', `/org/${shop.orgId}/shop/business`, { paymentMethods: ['cash', 'wave'] }))).paymentMethods).toEqual([{ value: 'cash', label: 'Espèces' }]);
   });
 
   it('an owner sees their own business as editable and cannot order from it', async () => {
@@ -604,23 +610,21 @@ describe('likes', () => {
 describe('mes ventes', () => {
   it('totals completed orders for a period: by method, by day, best sellers, what is still owed; the rest apart; managers only', async () => {
     const { b, owner, orgId, sp } = await business('restaurant');
-    await ok(call(owner, 'PATCH', `/org/${orgId}/${sp}/business`, { paymentMethods: ['cash', 'wave'] }));
     const staff = await createStaff(t);
     await call(owner, 'PUT', `/org/${orgId}/${sp}/members`, { phone: staff.phone, roles: ['staff'] });
     const mafe = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'menu', name: 'Mafé yap', price: 1500 }), 201);
     const bissap = await ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'drink', name: 'Bissap', price: 300 }), 201);
     const s = await registerStudent(t);
-    const order = (lines: { itemId: string; qty: number }[], method: 'cash' | 'wave') => ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines, mode: 'pickup', method }), 201);
+    const order = (lines: { itemId: string; qty: number }[], method: 'cash') => ok(call(s, 'POST', `/businesses/${b.id}/orders`, { lines, mode: 'pickup', method }), 201);
     const serve = async (id: string) => {
       for (const step of ['accept', 'ready', 'complete']) await ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${id}/${step}`));
     };
 
-    // 31 Oct: two sales (cash, Wave), one refused, one still being served.
+    // 31 Oct: two sales, one refused, one still being served.
     const cash = await order([{ itemId: mafe.id, qty: 2 }], 'cash');
     await serve(cash.order.id);
-    const wave = await order([{ itemId: mafe.id, qty: 1 }], 'wave');
-    await pay(wave.payment.reference);
-    await serve(wave.order.id);
+    const more = await order([{ itemId: mafe.id, qty: 1 }], 'cash');
+    await serve(more.order.id);
     const refused = await order([{ itemId: bissap.id, qty: 4 }], 'cash');
     await ok(call(owner, 'POST', `/org/${orgId}/${sp}/orders/${refused.order.id}/refuse`, { reason: 'Plus de bissap.' }));
     await order([{ itemId: bissap.id, qty: 1 }], 'cash');
@@ -632,14 +636,13 @@ describe('mes ventes', () => {
     const sales = await ok(call(owner, 'GET', `/org/${orgId}/${sp}/sales?from=2026-10-31&to=2026-11-01`));
     expect(sales).toMatchObject({
       from: '2026-10-31', to: '2026-11-01', revenue: 4800, orders: 3, average: 1600,
-      methods: [{ method: 'cash', label: 'Espèces', amount: 3300, orders: 2 }, { method: 'wave', label: 'Wave', amount: 1500, orders: 1 }],
+      methods: [{ method: 'cash', label: 'Espèces', amount: 4800, orders: 3 }],
       days: [{ date: '2026-10-31', revenue: 4500, orders: 2 }, { date: '2026-11-01', revenue: 300, orders: 1 }],
       inProgress: 1, refused: 1, cancelled: 0,
     });
     expect(sales.top[0]).toEqual({ itemId: mafe.id, name: 'Mafé yap', qty: 3, revenue: 4500 });
-    // The Wave sale is paid out to the owner's number: owed until it arrives.
-    const payout = await t.c.mongo.db.collection('payouts').findOne({ _id: (await t.c.mongo.db.collection('commerceOrders').findOne({ _id: new ObjectId(wave.order.id) }))!.payoutId });
-    expect(sales.owed).toBe(payout!.status === 'succeeded' ? 0 : 1500);
+    // All paid by hand: the app owes nothing.
+    expect(sales.owed).toBe(0);
 
     // One day only, and a day with nothing.
     expect(await ok(call(owner, 'GET', `/org/${orgId}/${sp}/sales?from=2026-11-01&to=2026-11-01`))).toMatchObject({ revenue: 300, orders: 1, days: [{ date: '2026-11-01', revenue: 300 }] });
@@ -673,5 +676,61 @@ describe('payout numbers', () => {
     expect(back.payoutNumbers.orange_money).toMatch(/^\+221\d{9}$/);
     expect(back.payoutNumbers.orange_money).not.toBe('+221781112233');
     expect(back.payoutNumbers.wave).toBe('+221771112233');
+  });
+});
+
+describe('switching Wave off app-wide', () => {
+  it('admins only; no new Wave payment (UGB Connect’s fees); the teams and the students waiting are told; back on, the teams again', async () => {
+    const { owner, admin } = await business('restaurant');
+    const waiting = await registerStudent(t);
+    // A fee being paid with Wave (a banner, an event's publication).
+    await t.c.mongo.db.collection('payments').insertOne({
+      reference: 'PAY_WAITING0000000000000', userId: new ObjectId(waiting.userId), purpose: 'banner', purposeRef: new ObjectId(), amount: 2000, currency: 'XOF',
+      method: 'wave', provider: 'simulated', status: 'pending', fulfillment: 'pending', expiresAt: new Date(T0 + 600_000), statusHistory: [], createdAt: new Date(T0), updatedAt: new Date(T0),
+    });
+    const other = await registerStudent(t);
+
+    expect((await call(other, 'PUT', '/admin/payments/methods/wave', { enabled: false })).statusCode).toBe(403);
+    const off = await ok(call(admin, 'PUT', '/admin/payments/methods/wave', { enabled: false, note: 'Panne chez Wave.' }));
+    expect(off.items).toEqual([
+      { method: 'wave', available: false, offSince: expect.any(String), note: 'Panne chez Wave.' },
+      { method: 'orange_money', available: true, offSince: null, note: null },
+    ]);
+    expect((await ok(call(other, 'GET', '/payments/methods'))).items[0].available).toBe(false);
+    await expect(t.c.modules.payments.assertAvailable('wave')).rejects.toMatchObject({ code: 'METHOD_OFF' });
+    await t.c.modules.payments.assertAvailable('orange_money');
+
+    expect(await types(owner)).toContain('payments.method_off');
+    expect(await types(waiting)).toContain('payments.method_off_pending');
+    expect(await types(other)).not.toContain('payments.method_off_pending');
+    // Switched off again: nothing changes, nobody is told twice.
+    await ok(call(admin, 'PUT', '/admin/payments/methods/wave', { enabled: false }));
+    expect((await types(owner)).filter((x: string) => x === 'payments.method_off')).toHaveLength(1);
+
+    expect((await ok(call(admin, 'PUT', '/admin/payments/methods/wave', { enabled: true }))).items[0]).toMatchObject({ available: true, offSince: null });
+    expect(await types(owner)).toContain('payments.method_on');
+    await t.c.modules.payments.assertAvailable('wave');
+  });
+});
+
+describe('a restaurant’s weekly menu', () => {
+  it('each dish has its days: students see and order today’s only (Saturday here); every day is null', async () => {
+    const { b, owner, orgId, sp } = await business('restaurant');
+    const add = (name: string, days?: number[] | null) => ok(call(owner, 'POST', `/org/${orgId}/${sp}/catalog`, { section: 'menu', name, price: 1500, ...(days !== undefined ? { days } : {}) }), 201);
+    const saturday = await add('Thiéboudienne', [6]);
+    const monday = await add('Mafé', [1, 3]);
+    expect((await add('Yassa', [1, 2, 3, 4, 5, 6, 7])).days).toBeNull();
+    expect((await add('Domoda')).days).toBeNull();
+    expect(saturday.days).toEqual([6]);
+
+    const s = await registerStudent(t);
+    expect((await ok(call(s, 'GET', `/businesses/${b.id}`))).items.map((i: { name: string }) => i.name).sort()).toEqual(['Domoda', 'Thiéboudienne', 'Yassa']);
+    const refused = await call(s, 'POST', `/businesses/${b.id}/orders`, { lines: [{ itemId: monday.id, qty: 1 }], mode: 'pickup', method: 'cash' });
+    expect(json(refused).code).toBe('ITEM_UNAVAILABLE');
+    // The owner sees the whole week.
+    expect((await ok(call(owner, 'GET', `/org/${orgId}/${sp}/catalog`))).items.find((i: { id: string }) => i.id === monday.id).days).toEqual([1, 3]);
+    // On Monday, the Mafé is on.
+    t.clock.advance(2 * 24 * 3_600_000);
+    expect((await ok(call(s, 'GET', `/businesses/${b.id}`))).items.map((i: { name: string }) => i.name)).toContain('Mafé');
   });
 });

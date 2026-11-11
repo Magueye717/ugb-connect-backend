@@ -1,6 +1,5 @@
 import type { ObjectId } from 'mongodb';
 
-import type { PaymentMethod } from '../payments/index.js';
 import type { TicketPaymentMethod } from '../ticketing/index.js';
 
 export const DIRECTIONS = ['aller', 'retour'] as const;
@@ -95,6 +94,10 @@ export type BookingDoc = {
   userId: ObjectId;
   /** Seats paid together: the payment's `purposeRef`. */
   orderId: ObjectId;
+  /** The request's code (all its seats): shown as a QR code (UGBREQ:…), scanned or typed by the organizer. */
+  requestCode?: string;
+  /** This seat's own code (UGBREQ:…): paid and validated on its own, the order's other seats still waiting. */
+  seatCode?: string;
   /**
    * 1..maxSeatsPerStudent, unique per student and departure while the booking counts for the limit: two purchases
    * made at the same moment can't both take the last slot.
@@ -131,6 +134,10 @@ export const MAX_SEATS_PER_STUDENT = 10;
 
 /** Seats are held this long while paying. */
 export const HOLD_MIN = 10;
+/** A request waits this long for its organizer to validate it (cash received), never past the departure. */
+export const REQUEST_H = 24;
+/** Requests waiting at once, per student (one per departure). */
+export const MAX_PENDING_REQUESTS = 3;
 /** Bookings close this long before departure (default). */
 export const BOOKING_CLOSE_MIN = 30;
 /** Seats in the first row, on the right (the door and the driver take the left): the seat map starts with them. */

@@ -154,7 +154,7 @@ export class TicketingService {
       status: 'active',
       version: 1,
       admittedAt: null,
-      ...(input.paidWith === 'cash' ? { cashCollectedAt: null } : {}),
+      ...(input.paidWith === 'cash' ? { cashCollectedAt: input.cashCollectedAt ?? null } : {}),
       cancellation: null,
       createdAt: now,
       updatedAt: now,
@@ -391,7 +391,7 @@ export class TicketingService {
           type: `ticket.${c.reason}`, category: 'paiements', icon: 'close-circle-outline', tone: 'danger', url: `/billet/${t._id.toHexString()}`,
           dedupeKey: `ticket:${t._id.toHexString()}:cancelled`,
           title: c.reason === 'min_not_reached' ? 'Départ annulé : pas assez de passagers' : `Annulé par l’organisateur${event ? ` : ${event.title}` : ''}`,
-          body: `${event ? `${event.title}, ${dakar.format(new Date(event.startsAt))}. ` : ''}${t.paidWith === 'cash' ? 'Ta réservation est annulée : rien à payer.' : `${fcfa} remboursés sur ton numéro.`}`,
+          body: `${event ? `${event.title}, ${dakar.format(new Date(event.startsAt))}. ` : ''}${t.paidWith === 'cash' ? (t.cashCollectedAt ? 'Ta place est annulée. Tu as payé l’organisateur en espèces : vois avec lui pour le remboursement.' : 'Ta réservation est annulée : rien à payer.') : `${fcfa} remboursés sur ton numéro.`}`,
         },
         session,
       );
