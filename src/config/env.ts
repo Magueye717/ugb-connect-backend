@@ -25,6 +25,12 @@ const EnvSchema = Type.Object({
   BOOTSTRAP_ADMIN_FIRST_NAME: Type.String({ default: 'Admin' }),
   BOOTSTRAP_ADMIN_LAST_NAME: Type.String({ default: 'Campus' }),
   /**
+   * The store reviewers' student account (« Student Test »), created by the deploy's migrate step when no account uses
+   * this phone (never changed afterwards). REVIEW_STUDENT_PHONE empty: nothing is created.
+   */
+  REVIEW_STUDENT_PHONE: Type.String({ default: '770000000' }),
+  REVIEW_STUDENT_PASSWORD: Type.String({ minLength: 8, default: 'Campus2026' }),
+  /**
    * The rentrée, every year ("MM-DD", Dakar): once given, the student's UFR, region and card details stay as they are
    * until the next one (a filled field can't be changed in between; an empty one can always be filled).
    */

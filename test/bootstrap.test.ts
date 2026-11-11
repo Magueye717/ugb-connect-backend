@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { allDataMigrations, migrateDatabase } from '../src/collections.js';
-import { ensureBootstrapAdmin } from '../src/modules/accounts/index.js';
+import { ensureBootstrapAdmin, ensureReviewStudent } from '../src/modules/accounts/index.js';
+import { TERMS_VERSION } from '../src/modules/legal/index.js';
 import { CAMPUS_PLACES } from '../src/modules/places/places.catalog.js';
 import { CAMPUS_RESTOS } from '../src/modules/public-restos/public-restos.catalog.js';
 import { verifyPassword } from '../src/platform/security/passwords.js';
@@ -31,6 +32,25 @@ describe('deploy bootstrap', () => {
     const again = await db.collection('users').findOne({ phone: '+221770000000' });
     expect(await verifyPassword(again!.passwordHash, 'Caampus2026')).toBe(true);
     expect(await db.collection('users').countDocuments({ phone: '+221770000000' })).toBe(1);
+  });
+
+  it('creates the store reviewers’ student « Student Test » once, then never touches the account again', async () => {
+    const db = t.c.mongo.db;
+    const review = { phone: '770000011', password: 'Campus2026', termsVersion: TERMS_VERSION };
+    expect(await ensureReviewStudent(t.c.mongo.client, db, t.clock, review)).toBe('created');
+    const user = await db.collection('users').findOne({ phone: '+221770000011' });
+    expect(user).toMatchObject({ firstName: 'Student', lastName: 'Test', platformRoles: [], status: 'active' });
+    expect(await db.collection('studentProfiles').findOne({ userId: user!._id })).toMatchObject({ ufr: 'SAT', campus: 'campus1' });
+
+    const login = await t.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { identifier: '770000011', password: 'Campus2026' } });
+    expect(login.statusCode, login.body).toBe(200);
+    // A student: the student space opens.
+    const me = await t.app.inject({ url: '/api/v1/me', headers: { authorization: `Bearer ${json(login).tokens.accessToken}` } });
+    expect(json(me).spaces.map((x: { type: string }) => x.type)).toEqual(['student']);
+
+    // The next deploy, another password: unchanged.
+    expect(await ensureReviewStudent(t.c.mongo.client, db, t.clock, { ...review, password: 'Different2027' })).toBe('exists');
+    expect(await verifyPassword((await db.collection('users').findOne({ phone: '+221770000011' }))!.passwordHash, 'Campus2026')).toBe(true);
   });
 
   it('adds the campus places once: a place the team deletes does not come back', async () => {

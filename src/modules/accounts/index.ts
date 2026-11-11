@@ -1,10 +1,12 @@
 import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
-import type { Db, ObjectId } from 'mongodb';
+import type { Db, MongoClient, ObjectId } from 'mongodb';
 
 import { actorOf } from '../../platform/auth/auth.js';
 import type { Clock } from '../../platform/clock.js';
 import { errors } from '../../platform/http/errors.js';
+import { withTransaction } from '../../platform/db/mongo.js';
 import { normalizePhone } from '../../platform/phone.js';
+import { hashPassword } from '../../platform/security/passwords.js';
 import { toObjectId } from '../../platform/http/schemas.js';
 import type { AuditApi } from '../audit/index.js';
 import type { MediaApi, MediaUsage } from '../media/index.js';
@@ -56,6 +58,30 @@ export async function ensureBootstrapAdmin(db: Db, clock: Clock, input: { phone:
   if (await service.findByPhone(phone)) return 'exists';
   const user = await service.createStaffUser({ phone, password: input.password, firstName: input.firstName, lastName: input.lastName });
   await service.setPlatformRoles(user._id, ['admin']);
+  return 'created';
+}
+
+/**
+ * Deploys: the student account the store reviewers (Google Play, App Store) sign in with, « Student Test », from the
+ * server's settings. Only when no account uses this phone yet: an existing one is left exactly as it is.
+ */
+export async function ensureReviewStudent(client: MongoClient, db: Db, clock: Clock, input: { phone: string; password: string; termsVersion: string }): Promise<'created' | 'exists'> {
+  const phone = normalizePhone(input.phone);
+  if (!phone) throw new Error('REVIEW_STUDENT_PHONE is not a valid Senegalese number');
+  const service = new AccountsService(new AccountsRepository(db), clock, () => {
+    throw new Error('Organizations are not available while creating the review account');
+  });
+  if (await service.findByPhone(phone)) return 'exists';
+  const passwordHash = await hashPassword(input.password);
+  await withTransaction(client, (session) =>
+    service.createStudentAccount(
+      {
+        phone, studentNumber: null, firstName: 'Student', lastName: 'Test', campus: 'campus1', onCampus: true, village: 'Village E', room: '101',
+        ufr: 'SAT', region: 'Saint-Louis', niveau: 'Licence 1', passwordHash, termsVersion: input.termsVersion,
+      },
+      session,
+    ),
+  );
   return 'created';
 }
 
