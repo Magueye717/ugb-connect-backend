@@ -267,6 +267,8 @@ describe('events', () => {
     expect(tickets.every((x) => x.paidWith === 'cash' && x.cashCollectedAt)).toBe(true);
     expect(await t.c.mongo.db.collection('tickets').countDocuments({ eventId: new ObjectId(ev.id), holderUserId: new ObjectId(owner.userId) })).toBe(0);
     expect((await ok(call(friend, 'GET', '/notifications'))).items.map((n: { type: string }) => n.type)).toContain('event.friend_gift');
+    // It opens the tickets themselves.
+    expect((await ok(call(friend, 'GET', '/notifications'))).items.find((n: { type: string }) => n.type === 'event.friend_gift').url).toMatch(/^\/billet\/[0-9a-f]{24}$/);
   });
 
   it('a free event issues its tickets at once', async () => {

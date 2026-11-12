@@ -390,6 +390,8 @@ export class EventsService {
       id: b._id.toHexString(), status: b.status, total: waitingTotal(b), expiresAt: b.holdExpiresAt.toISOString(), createdAt: b.createdAt.toISOString(),
       tickets: [...per.values()], student: who ? { name: `${who.firstName} ${who.lastName}`, phone: who.phone } : null,
       units: waiting.map((u) => ({ id: u.unitId.toHexString(), name: u.name, price: u.price, code: u.requestCode ?? null })),
+      // The whole request's code (« Tout payer »), as the student shows it.
+      code: b.requestCode ?? null,
       validated: b.units.filter((u) => u.status === 'confirmed').length,
     };
   }
@@ -415,8 +417,11 @@ export class EventsService {
     const who = by ? `${by.firstName} ${by.lastName}` : 'L’organisateur';
     const n = b.units.length;
     const tickets = `${n} billet${n > 1 ? 's' : ''}`;
+    // Already issued: straight to the tickets (the first opens with the others one tap away); to pay: the event.
+    const issued = toPay ? null : (await this.bookings.findOne({ _id: b._id }))?.units.find((u) => u.ticketId)?.ticketId;
     await this.notifications.notify([b.userId], {
-      type: toPay ? 'event.friend_order' : 'event.friend_gift', category: 'paiements', icon: 'ticket-outline', tone: toPay ? 'warning' : 'success', url: `/evenement/${e._id.toHexString()}`,
+      type: toPay ? 'event.friend_order' : 'event.friend_gift', category: 'paiements', icon: 'ticket-outline', tone: toPay ? 'warning' : 'success',
+      url: issued ? `/billet/${issued.toHexString()}` : `/evenement/${e._id.toHexString()}`,
       dedupeKey: `event-booking:${b._id.toHexString()}:friend`,
       title: `${who} t’a commandé ${tickets} · ${e.title}`,
       body: toPay

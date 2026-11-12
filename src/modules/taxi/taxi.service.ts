@@ -657,9 +657,36 @@ export class TaxiService {
     return payout;
   }
 
-  /** Worker: trips 15 min past their time stop blocking their people from joining another one. */
+  /**
+   * Trips whose time has come leave by themselves, as if the organizer had said « On est partis » (they still may,
+   * earlier): marked departed at their time, nobody can join, their people are free for another trip, the chat says so.
+   */
+  private async departDue(now: Date) {
+    const due = await this.trips.find({ status: 'open', departureAt: { $lte: now }, chatClosesAt: { $gt: now } }, { projection: { _id: 1, departureAt: 1 } }).limit(200).toArray();
+    let n = 0;
+    for (const t of due) {
+      await withTransaction(this.mongo, async (session) => {
+        const holds = await this.participants.find({ tripId: t._id, status: 'pending_payment' }, { session }).toArray();
+        const res = await this.trips.updateOne(
+          { _id: t._id, status: 'open' },
+          { $set: { status: 'departed', departedAt: t.departureAt, updatedAt: now }, ...(holds.length ? { $inc: { seatsTaken: -holds.length } } : {}) },
+          { session },
+        );
+        if (!res.modifiedCount) return;
+        n++;
+        for (const p of holds) if (p.paymentId) await this.payments.cancelInSession(p.paymentId, session);
+        await this.participants.updateMany({ tripId: t._id, status: 'pending_payment' }, { $set: { status: 'expired', active: false, holdExpiresAt: null, updatedAt: now } }, { session });
+        await this.participants.updateMany({ tripId: t._id, activeTrip: true }, { $set: { activeTrip: false, updatedAt: now } }, { session });
+        await this.say(t._id, 'Heure du départ : bon trajet 🚕', session);
+      });
+    }
+    return n;
+  }
+
+  /** Worker: trips at their time leave; trips past it that never could (chat closed) stop blocking their people. */
   async sweep() {
     const now = this.clock.now();
+    await this.departDue(now);
     const stale = await this.trips
       .find({ status: 'open', departureAt: { $lt: new Date(now.getTime() - TAXI_GRACE_MIN * MIN), $gt: new Date(now.getTime() - 2 * DAY) } }, { projection: { _id: 1 } })
       .toArray();
@@ -688,6 +715,8 @@ export class TaxiService {
   /** Open trips (until 15 min after their time), plus mine while their chat is open. */
   async board(userId: ObjectId): Promise<TaxiTripDoc[]> {
     const now = this.clock.now();
+    // Not waiting for the worker: a trip whose time has come is shown gone.
+    await this.departDue(now);
     const open = await this.trips.find({ status: 'open', departureAt: { $gt: new Date(now.getTime() - TAXI_GRACE_MIN * MIN) } }).sort({ departureAt: 1 }).limit(50).toArray();
     const mine = await this.participants
       .find({ userId, $or: [{ active: true }, { forfeited: true }], createdAt: { $gt: new Date(now.getTime() - TAXI_DEPARTURE.maxDays * DAY - DAY) } }, { projection: { tripId: 1 } })

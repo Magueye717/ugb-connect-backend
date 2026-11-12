@@ -365,7 +365,7 @@ export class LostService {
   async lookupCard(userId: ObjectId, number: string) {
     await this.limiter.hit(`lost-card-lookup:${userId.toHexString()}`, { limit: 30, windowS: 3600 });
     const n = number.toUpperCase().replace(/\s/g, '');
-    if (!STUDENT_NUMBER_RE.test(n)) throw errors.validation('Numéro étudiant invalide. Exemple : P232055', { field: 'number' });
+    if (!STUDENT_NUMBER_RE.test(n)) throw errors.validation('Numéro étudiant invalide : P puis des chiffres, 4 caractères au moins. Exemple : P232055', { field: 'number' });
     const owner = await this.accounts.studentByNumber(n);
     return { studentNumber: n, owner: owner ? this.match(owner) : null };
   }

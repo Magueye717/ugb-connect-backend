@@ -276,6 +276,7 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
     student: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })),
     units: Type.Array(Type.Object({ id: Type.String(), name: Type.String(), price: Type.Number(), code: Nullable(Type.String()) }), { description: 'Each ticket still waiting: validate some (unitIds) or all.' }),
     validated: Type.Integer({ description: 'Tickets of this request validated already.' }),
+    code: Nullable(Type.String({ description: 'The whole request’s code (UGBREQ:…): every ticket waiting, paid at once.' })),
   });
   // No body (validate all), or the ones paid.
   const ValidateBody = Nullable(Type.Object({ unitIds: Type.Optional(Type.Array(ObjectIdString, { minItems: 1, maxItems: 20 })) }, { additionalProperties: false }));

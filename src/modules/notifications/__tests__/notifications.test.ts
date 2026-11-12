@@ -108,7 +108,7 @@ describe('what triggers them', () => {
     }
 
     const offer = json(await call(a, 'POST', `/tickets/${ticketA}/transfers`, { recipientPhone: friend.phone }));
-    expect(json(await call(friend, 'GET', '/notifications')).items[0]).toMatchObject({ type: 'ticket.transfer_offered', title: 'Awa D. t’offre son billet', url: '/(tabs)/caravanes?vue=caravanes' });
+    expect(json(await call(friend, 'GET', '/notifications')).items[0]).toMatchObject({ type: 'ticket.transfer_offered', title: 'Awa D. t’offre son billet', url: expect.stringMatching(/^\/cadeau\/[0-9a-f]{24}\?ticket=[0-9a-f]{24}$/) });
     await call(friend, 'POST', `/ticket-transfers/${offer.id}/accept`);
     expect(json(await call(a, 'GET', '/notifications')).items[0]).toMatchObject({ type: 'ticket.transfer_accepted', url: `/billet/${ticketA}` });
 

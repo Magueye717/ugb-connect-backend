@@ -81,8 +81,9 @@ export type Audience = { campuses: Campus[]; ufrs: UfrCode[]; regions: Region[] 
 export type AudienceProfile = { campus: Campus; ufr: UfrCode | null; region: Region | null; village?: string | null } | null;
 
 /** Student numbers: P then digits, 12 characters at most ("P232055"), spaces removed and upper-cased first. */
-export const STUDENT_NUMBER_MAX = 12;
-export const STUDENT_NUMBER_RE = /^P\d{6,11}$/;
+/** A student number: P then digits, 4 characters at least (« P123 »), 20 at most. */
+export const STUDENT_NUMBER_MAX = 20;
+export const STUDENT_NUMBER_RE = /^P\d{3,19}$/;
 export const ROOM_RE = /^[A-Z]?\d{1,4}[A-Z]?$/;
 export const NAME_RE = /^[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[ '-][A-Za-zÀ-ÖØ-öø-ÿ]+)*$/;
 

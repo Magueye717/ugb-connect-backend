@@ -492,6 +492,8 @@ export class CaravansService {
     const place = (id: string) => [...d.pickups, ...d.dropoffs].find((s) => s.stopId === id)?.place ?? '';
     return {
       id: order[0]!.orderId.toHexString(), status: order[0]!.status, total: order.reduce((n, b) => n + b.price, 0),
+      // The whole request's code (« Tout payer »), as the student shows it.
+      code: order[0]!.requestCode ?? null,
       expiresAt: order[0]!.holdExpiresAt.toISOString(), createdAt: order[0]!.createdAt.toISOString(),
       student: who ? { name: `${who.firstName} ${who.lastName}`, phone: who.phone } : null,
       seats: order.map((b) => ({ id: b._id.toHexString(), seat: b.seat, price: b.price, code: b.seatCode ?? null, passenger: b.passenger?.name ?? null, pickup: place(b.pickupStopId), dropoff: place(b.dropoffStopId) })),

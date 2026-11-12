@@ -12,7 +12,8 @@ import { dishKey } from './public-restos.collections.js';
 
 const MIN = 60_000;
 /** Where students see the menus: the "Restos publics" tab. */
-const MENUS_ROUTE = '/(tabs)/resto?vue=publics';
+// The university restaurants' menus live on the home screen.
+const MENUS_ROUTE = '/(tabs)';
 const dakarDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Dakar', year: 'numeric', month: '2-digit', day: '2-digit' });
 
 /** Local date "YYYY-MM-DD" in Dakar. */

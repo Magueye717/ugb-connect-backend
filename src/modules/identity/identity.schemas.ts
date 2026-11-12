@@ -39,7 +39,7 @@ export const VerifyResponse = Type.Object({ verificationToken: Type.String() });
 export const RegisterBody = Type.Object(
   {
     verificationToken: Type.String({ minLength: 10, maxLength: 2000 }),
-    studentNumber: Type.Optional(Type.Union([Type.String({ maxLength: 30 }), Type.Null()], { description: 'Optional (added later on the profile): P then digits, 12 characters at most once spaces are removed.' })),
+    studentNumber: Type.Optional(Type.Union([Type.String({ maxLength: 30 }), Type.Null()], { description: 'Optional (added later on the profile): P then digits, 4 to 20 characters once spaces are removed.' })),
     firstName: Type.String({ minLength: 1, maxLength: 60 }),
     lastName: Type.String({ minLength: 1, maxLength: 60 }),
     campus: CampusSchema,

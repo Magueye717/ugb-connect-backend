@@ -52,7 +52,7 @@ export class AccountsService {
 
   normalizeStudentNumber(input: string) {
     const v = input.toUpperCase().replace(/\s/g, '');
-    if (!STUDENT_NUMBER_RE.test(v)) throw errors.validation('Numéro étudiant invalide. Exemple : P232055', { field: 'studentNumber' });
+    if (!STUDENT_NUMBER_RE.test(v)) throw errors.validation('Numéro étudiant invalide : P puis des chiffres, 4 caractères au moins. Exemple : P232055', { field: 'studentNumber' });
     return v;
   }
 

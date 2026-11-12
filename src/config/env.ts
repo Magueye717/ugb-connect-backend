@@ -162,7 +162,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     DOCS_ENABLED: toBool(raw.DOCS_ENABLED),
     OTP_DEV_MODE: toBool(raw.OTP_DEV_MODE),
     PAYMENTS_SIMULATOR: toBool(raw.PAYMENTS_SIMULATOR),
-    TAXI_ONLINE_PAYMENT: toBool(raw.TAXI_ONLINE_PAYMENT),
+    // Sunu Taxi takes no payment in the app: a seat is a reservation, the share paid in the taxi. Only the tests
+    // still exercise the old paid trips.
+    TAXI_ONLINE_PAYMENT: toBool(raw.TAXI_ONLINE_PAYMENT) && !isProduction,
     SIMULATOR_WEBHOOK_SECRET: raw.SIMULATOR_WEBHOOK_SECRET ?? DEV_SIMULATOR_SECRET,
     jwt: { privateKeyPem: decode(raw.JWT_PRIVATE_KEY_B64), publicKeyPem: decode(raw.JWT_PUBLIC_KEY_B64) },
     OTP_PEPPER: raw.OTP_PEPPER ?? DEV_PEPPER,

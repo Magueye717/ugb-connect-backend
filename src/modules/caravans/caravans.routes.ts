@@ -459,6 +459,7 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
   const RequestView = Type.Object({
     id: Type.String({ description: 'The order: its seats waiting are validated all together, or some (bookingIds); refused together.' }), status: Type.String(), total: Type.Number(), expiresAt: Type.String(), createdAt: Type.String(),
     student: Nullable(Type.Object({ name: Type.String(), phone: Type.String() })),
+    code: Nullable(Type.String({ description: 'The whole request’s code (UGBREQ:…): every seat waiting, paid at once.' })),
     seats: Type.Array(Type.Object({ id: Type.String(), seat: Type.Number(), price: Type.Number(), code: Nullable(Type.String()), passenger: Nullable(Type.String()), pickup: Type.String(), dropoff: Type.String() })),
   });
   // No body (validate all), or the ones paid.

@@ -148,11 +148,11 @@ describe('rupture', () => {
     expect((await ok(call(staff, 'PATCH', url, { status: 'out', notify: true }))).dishes[2].status).toBe('out');
     const alerts = (await ok(call(student, 'GET', '/alerts'))).items;
     const a = alerts.find((x: { title: string }) => x.title === `Rupture · Thiébou dieun · ${resto.name}`);
-    expect(a).toMatchObject({ kind: 'resto_stock', tone: 'warning', href: '/(tabs)/resto?vue=publics', endsAt: `${day}T15:00:00.000Z` });
+    expect(a).toMatchObject({ kind: 'resto_stock', tone: 'warning', href: '/(tabs)', endsAt: `${day}T15:00:00.000Z` });
     expect(a.body).toBe(`Plus de Thiébou dieun au ${resto.name} pour le déjeuner. Encore au menu : Vermicelle, Mafé yap.`);
     // Jobs aren't listed in creation order: find it by title.
     expect((await broadcasts()).length - before).toBe(1);
-    expect((await broadcasts()).find((j) => j.title === a.title)).toMatchObject({ category: 'campus', url: '/(tabs)/resto?vue=publics' });
+    expect((await broadcasts()).find((j) => j.title === a.title)).toMatchObject({ category: 'campus', url: '/(tabs)' });
 
     // Reported twice: still one alert, no second push.
     await ok(call(staff, 'PATCH', url, { status: 'out' }));

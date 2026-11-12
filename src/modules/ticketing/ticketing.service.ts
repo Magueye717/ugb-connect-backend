@@ -479,7 +479,8 @@ export class TicketingService {
     const when = event ? `${event.title}, ${dakar.format(new Date(event.startsAt))}. ` : '';
     const from = shortName(people.get(fromUserId.toHexString()));
     await this.notifications.notify([toUserId], {
-      type: 'ticket.transfer_offered', category: 'social', icon: 'gift-outline', tone: 'purple', url: '/(tabs)/caravanes?vue=caravanes',
+      // Opens the offer itself (accept / refuse), then the ticket once it's mine.
+      type: 'ticket.transfer_offered', category: 'social', icon: 'gift-outline', tone: 'purple', url: `/cadeau/${doc._id.toHexString()}?ticket=${t._id.toHexString()}`,
       dedupeKey: `transfer:${doc._id.toHexString()}:offered`,
       title: why === 'companion' ? `${from} t’a réservé une place` : `${from} t’offre son billet`,
       body: why === 'companion' ? `${when}Ajoute le billet à ton app pour avoir ton propre QR code.` : `${when}Accepte-le avant le ${dakar.format(doc.expiresAt)}.`,

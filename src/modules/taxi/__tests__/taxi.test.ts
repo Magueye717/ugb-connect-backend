@@ -295,9 +295,11 @@ describe('meeting point, departure and claim', () => {
     // Still within its grace: it blocks.
     t.clock.advance(40 * MIN);
     expect(json(await call(org, 'POST', '/taxi/trips', { from: 'UGB · Village A', to: 'Saint-Louis · Sor', seats: 3, fare: 2000, leaveInMinutes: 60 }))).toMatchObject({ code: 'ALREADY_IN_TRIP', tripId: old.id });
-    // Past it (no sweep ran): off the board, and freed as soon as I propose another.
+    // Its time has come (no sweep ran): it left by itself. Still on my board, departed (its chat stays open); gone
+    // from everyone else's; and I'm free to propose another.
     t.clock.advance(10 * MIN);
-    expect((await call(org, 'GET', '/taxi/trips')).body).not.toContain(old.id);
+    expect(json(await call(org, 'GET', '/taxi/trips')).items.find((x: { id: string }) => x.id === old.id)).toMatchObject({ status: 'departed' });
+    expect((await call(await registerStudent(t), 'GET', '/taxi/trips')).body).not.toContain(old.id);
     const fresh = await newTrip(org, { leaveInMinutes: 60 });
     expect(json(await call(org, 'GET', '/taxi/me')).activeTripId).toBe(fresh.id);
 

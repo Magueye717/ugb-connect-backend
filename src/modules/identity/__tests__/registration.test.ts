@@ -104,14 +104,16 @@ describe('sign-up', () => {
     const me = json(await t.app.inject({ url: '/api/v1/me', headers: { authorization: `Bearer ${json(res).tokens.accessToken}` } }));
     expect(me.student).toMatchObject({ studentNumber: 'P777001', room: 'C12', ufr: 'SEG', region: 'Ziguinchor', verified: false });
     expect(me.spaces).toEqual([{ key: 'student', type: 'student', kind: null, orgId: null, name: 'Étudiant', roles: [], logoUrl: null, personal: false }]);
-    // Longer numbers too (P then digits, 12 characters at most); anything else: refused.
+    // Short or long (P then digits, 4 to 20 characters); anything else: refused.
     const long = `P${String(Date.now()).slice(-11)}`;
     expect((await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: long.toLowerCase() }) })).statusCode).toBe(201);
-    for (const n of ['P12345', 'P-232-055', 'A2320551', `P${'1'.repeat(12)}`]) {
+    const short = `P${String(Date.now()).slice(-3)}`;
+    expect((await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: short }) })).statusCode).toBe(201);
+    for (const n of ['P12', 'P-232-055', 'A2320551', `P${'1'.repeat(20)}`]) {
       const r = json(await post('/auth/register', { verificationToken: await verified(nextPhone()), ...profile({ studentNumber: n }) }));
       expect(r.field, `${n} ${JSON.stringify(r)}`).toBe('studentNumber');
     }
-    expect(json(await t.app.inject({ url: '/api/v1/reference/student' })).studentNumber).toEqual({ pattern: '^P\\d{6,11}$', maxLength: 12, example: 'P232055' });
+    expect(json(await t.app.inject({ url: '/api/v1/reference/student' })).studentNumber).toEqual({ pattern: '^P\\d{3,19}$', maxLength: 20, example: 'P232055' });
   });
 
   it('asks the UFR and the home region; given, they change at the next rentrée only; the lists are public', async () => {

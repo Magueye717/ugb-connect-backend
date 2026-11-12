@@ -1,6 +1,6 @@
 import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
-import { CAMPUSES, PLATFORM_ROLES, REGIONS, UFR_CODES } from './accounts.types.js';
+import { CAMPUSES, PLATFORM_ROLES, REGIONS, STUDENT_NUMBER_RE, UFR_CODES } from './accounts.types.js';
 
 export const accountsCollections: CollectionSpec[] = [
   {
@@ -41,7 +41,8 @@ export const accountsCollections: CollectionSpec[] = [
       $jsonSchema: bson.object(
         {
           userId: bson.objectId,
-          studentNumber: bson.nullable(bson.string({ pattern: '^P\\d{6,11}$' })),
+          // The same rule as the API (STUDENT_NUMBER_RE): P then digits, 4 to 20 characters.
+          studentNumber: bson.nullable(bson.string({ pattern: STUDENT_NUMBER_RE.source })),
           campus: bson.enumOf(CAMPUSES),
           onCampus: bson.bool,
           village: { bsonType: ['string', 'null'] },
