@@ -20,7 +20,7 @@ import type { OrganizationsPort, PlatformRole } from './accounts.types.js';
 
 export type { StudentCard } from './accounts.service.js';
 export type { Audience, AudienceProfile, Campus, NewStudentAccount, OrganizationsPort, MembershipSummary, Niveau, PlatformRole, Region, UfrCode, UserDoc } from './accounts.types.js';
-export { CAMPUS_LABELS, CAMPUSES, NIVEAUX, PLATFORM_ROLE_LABELS, PLATFORM_ROLES, REGIONS, STUDENT_NUMBER_MAX, STUDENT_NUMBER_RE, UFR_CODES, UFRS, VILLAGES } from './accounts.types.js';
+export { CAMPUS_LABELS, CAMPUSES, NIVEAUX, PLATFORM_ROLE_LABELS, PLATFORM_ROLES, REGIONS, STORED_STUDENT_NUMBER_RE, STUDENT_NUMBER_MAX, STUDENT_NUMBER_RE, UFR_CODES, UFRS, VILLAGES } from './accounts.types.js';
 export type { StudentProfileInput } from './accounts.service.js';
 export { CampusSchema, NiveauInput, RegionInput, UfrInput } from './accounts.schemas.js';
 export { accountsCollections, accountsMigrations };
@@ -57,7 +57,8 @@ export async function ensureBootstrapAdmin(db: Db, clock: Clock, input: { phone:
   });
   if (await service.findByPhone(phone)) return 'exists';
   const user = await service.createStaffUser({ phone, password: input.password, firstName: input.firstName, lastName: input.lastName });
-  await service.setPlatformRoles(user._id, ['admin']);
+  // The first administrator also runs the team, the payment switches and the notifications (the explicit roles).
+  await service.setPlatformRoles(user._id, ['admin', 'payments_manager', 'notifications_sender', 'team_manager']);
   return 'created';
 }
 
@@ -137,8 +138,8 @@ export function createAccountsModule(deps: { db: Db; clock: Clock; rentree: stri
     requireAnyPlatformRole,
     restosOf: (u) => team.restosOf(u),
     registerRoutes: (app) => {
-      registerAccountsRoutes(app, { service, audit: deps.audit, requireStudent, requireAdmin: requirePlatformRole('admin'), claimImage: (u, id) => deps.media().claim(u, [id]).then((r) => r[0]!), releaseImages: (ids) => deps.media().release(ids) });
-      registerTeamRoutes(app, { team, audit: deps.audit, requireAdmin: requirePlatformRole('admin') });
+      registerAccountsRoutes(app, { service, audit: deps.audit, requireStudent, requireAdmin: requirePlatformRole('admin'), requireTeam: requirePlatformRole('team_manager'), claimImage: (u, id) => deps.media().claim(u, [id]).then((r) => r[0]!), releaseImages: (ids) => deps.media().release(ids) });
+      registerTeamRoutes(app, { team, audit: deps.audit, requireAdmin: requirePlatformRole('team_manager') });
     },
   };
 }

@@ -7,6 +7,7 @@ import { createMediaModule, type MediaApi } from './modules/media/index.js';
 import { createEventsModule, EVENTS_MEDIA_USAGE, type EventsApi } from './modules/events/index.js';
 import { BANNERS_MEDIA_USAGE, createBannersModule, type BannersApi } from './modules/banners/index.js';
 import { createPublicRestosModule, type PublicRestosApi } from './modules/public-restos/index.js';
+import { createHousingModule, type HousingApi } from './modules/housing/index.js';
 import { createLostModule, LOST_MEDIA_USAGE, TesseractCardReader, type CardReader, type LostApi } from './modules/lost/index.js';
 import { COMMERCE_MEDIA_USAGE, createCommerceModule, type CommerceApi } from './modules/commerce/index.js';
 import { createPlacesModule, PLACES_MEDIA_USAGE, type PlacesApi } from './modules/places/index.js';
@@ -38,7 +39,7 @@ export type Container = {
   tokens: TokenService;
   denylist: SessionDenylist;
   hub: RealtimeHub;
-  modules: { audit: AuditApi; accounts: AccountsApi; organizations: OrganizationsApi; identity: IdentityApi; payments: PaymentsApi; messaging: MessagingApi; taxi: TaxiApi; ticketing: TicketingApi; caravans: CaravansApi; notifications: NotificationsApi; alerts: AlertsApi; publicRestos: PublicRestosApi; media: MediaApi; events: EventsApi; banners: BannersApi; lost: LostApi; commerce: CommerceApi; places: PlacesApi; ratings: RatingsApi };
+  modules: { audit: AuditApi; accounts: AccountsApi; organizations: OrganizationsApi; identity: IdentityApi; payments: PaymentsApi; messaging: MessagingApi; taxi: TaxiApi; ticketing: TicketingApi; caravans: CaravansApi; notifications: NotificationsApi; alerts: AlertsApi; publicRestos: PublicRestosApi; media: MediaApi; events: EventsApi; banners: BannersApi; lost: LostApi; housing: HousingApi; commerce: CommerceApi; places: PlacesApi; ratings: RatingsApi };
   close(): Promise<void>;
 };
 
@@ -81,6 +82,7 @@ export async function createContainer(config: Config, opts: { clock?: Clock; war
   const lost = createLostModule({
     db: mongo.db, mongo: mongo.client, clock, accounts, messaging, notifications, alerts, media, limiter, audit, reader: opts.cardReader ?? new TesseractCardReader(config.OCR_CACHE_DIR),
   });
+  const housing = createHousingModule({ db: mongo.db, mongo: mongo.client, clock, accounts, messaging, notifications, limiter, audit });
   // Where pictures are kept: one that none of these reference any more is deleted from the storage.
   media.trackUsage([...ACCOUNTS_MEDIA_USAGE, ...ORGANIZATIONS_MEDIA_USAGE, ...COMMERCE_MEDIA_USAGE, ...BANNERS_MEDIA_USAGE, ...EVENTS_MEDIA_USAGE, ...PLACES_MEDIA_USAGE, ...LOST_MEDIA_USAGE, ...ALERTS_MEDIA_USAGE]);
 
@@ -93,7 +95,7 @@ export async function createContainer(config: Config, opts: { clock?: Clock; war
     tokens,
     denylist,
     hub,
-    modules: { audit, accounts, organizations, identity, payments, messaging, taxi, ticketing, caravans, notifications, alerts, publicRestos, media, events, banners, lost, commerce, places, ratings },
+    modules: { audit, accounts, organizations, identity, payments, messaging, taxi, ticketing, caravans, notifications, alerts, publicRestos, media, events, banners, lost, housing, commerce, places, ratings },
     async close() {
       await lost.close();
       await hub.close();

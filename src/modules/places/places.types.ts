@@ -2,8 +2,8 @@ import type { ObjectId } from 'mongodb';
 
 import type { Campus } from '../accounts/index.js';
 
-/** Places are documented by Référencement only: as many pictures as it takes, with a ceiling against slips. */
-export const PLACE_MAX_PHOTOS = 30;
+/** Places are documented by Référencement only: no practical limit (a ceiling only against a runaway client). */
+export const PLACE_MAX_PHOTOS = 300;
 
 export const PLACE_CATEGORIES = ['Études', 'Restauration', 'Services', 'Sport', 'Santé', 'Administration', 'Logement', 'Culte', 'Transport'] as const;
 export type PlaceCategory = (typeof PLACE_CATEGORIES)[number];

@@ -68,7 +68,7 @@ export async function buildApp(c: Container, state = { shuttingDown: false }): P
   // The privacy policy and the terms as pages (the store listing links them).
   registerLegalPages(app, { phone: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL });
 
-  const { accounts, organizations, identity, payments, messaging, taxi, ticketing, caravans, notifications, alerts, publicRestos, media, events, banners, lost, commerce, places, ratings } = c.modules;
+  const { accounts, organizations, identity, payments, messaging, taxi, ticketing, caravans, notifications, alerts, publicRestos, media, events, banners, lost, housing, commerce, places, ratings } = c.modules;
   await app.register(
     async (api) => {
       identity.registerRoutes(api);
@@ -77,18 +77,20 @@ export async function buildApp(c: Container, state = { shuttingDown: false }): P
       registerLegalRoutes(api, { phone: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL });
       api.get('/reference/support', { schema: { tags: ['reference'] } }, async () => ({ phone: c.config.SUPPORT_PHONE, whatsapp: c.config.SUPPORT_PHONE, email: c.config.SUPPORT_EMAIL, hours: 'Lun.-sam. · 8h-20h' }));
       organizations.registerRoutes(api, accounts.requirePlatformRole('admin'), accounts.requireAnyPlatformRole(['caravan_editor']));
-      payments.registerRoutes(api, accounts.requirePlatformRole('finance'), accounts.requirePlatformRole('admin'));
+      payments.registerRoutes(api, accounts.requirePlatformRole('finance'), accounts.requirePlatformRole('payments_manager'));
       messaging.registerRoutes(api, accounts.requirePlatformRole('admin'));
       taxi.registerRoutes(api);
       ticketing.registerRoutes(api);
       caravans.registerRoutes(api);
-      notifications.registerRoutes(api, accounts.requirePlatformRole('admin'));
+      notifications.registerRoutes(api, accounts.requirePlatformRole('notifications_sender'));
       alerts.registerRoutes(api, accounts.requireAnyPlatformRole(['content_editor', 'academic_editor']));
       publicRestos.registerRoutes(api, { requireStaff: accounts.requirePlatformRole('resto_u_staff'), requireAdmin: accounts.requirePlatformRole('admin'), restosOf: (u) => accounts.restosOf(u) });
       await media.registerRoutes(api);
-      events.registerRoutes(api, accounts.requirePlatformRole('admin'));
+      // Students' events are validated by the super admin or the « Validation des événements » role.
+      events.registerRoutes(api, accounts.requirePlatformRole('event_moderator'));
       // After media: the card photo is a multipart upload.
       lost.registerRoutes(api, accounts.requirePlatformRole('lost_office'));
+      housing.registerRoutes(api, accounts.requirePlatformRole('admin'));
       // Restaurants and shops are added by the super admin's restaurant and shop editors (admins pass).
       commerce.registerRoutes(api, accounts.requireAnyPlatformRole(['restaurant_editor', 'shop_editor']));
       places.registerRoutes(api, accounts.requireAnyPlatformRole(['place_editor']));

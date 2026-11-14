@@ -8,9 +8,8 @@ import { normalizePhone, maskPhone } from '../../platform/phone.js';
 import { hashPassword, passwordProblem } from '../../platform/security/passwords.js';
 import type { AccountsRepository } from './accounts.repository.js';
 import { NIVEAUX,
-  CAMPUSES, EDIT_WINDOW_DAYS, NAME_RE, REGIONS, ROLE_SPACES, ROOM_RE, STUDENT_NUMBER_RE, UFR_CODES, VILLAGES,
-  type AppSpace, type Audience, type AudienceProfile, type Campus, type MembershipSummary, type Region, type UfrCode, type NewStudentAccount, type NotificationPrefs, type OrganizationsPort, type PlatformRole, type StudentProfileDoc, type UserDoc,
-} from './accounts.types.js';
+  CAMPUSES, EDIT_WINDOW_DAYS, NAME_RE, REGIONS, ROLE_SPACES, ROOM_RE, STORED_STUDENT_NUMBER_RE, STUDENT_NUMBER_RE, UFR_CODES, VILLAGES,
+  type AppSpace, type Audience, type AudienceProfile, type Campus, type MembershipSummary, type Region, type UfrCode, type NewStudentAccount, type NotificationPrefs, type OrganizationsPort, type PlatformRole, type StudentProfileDoc, type UserDoc, EXPLICIT_ROLES } from './accounts.types.js';
 
 /** Progressive lock after repeated wrong passwords: 5th failure → 1 min, then 5, 15, 60 min. */
 const LOCK_STEPS_MIN = [1, 5, 15, 60];
@@ -52,7 +51,7 @@ export class AccountsService {
 
   normalizeStudentNumber(input: string) {
     const v = input.toUpperCase().replace(/\s/g, '');
-    if (!STUDENT_NUMBER_RE.test(v)) throw errors.validation('Numéro étudiant invalide : P puis des chiffres, 4 caractères au moins. Exemple : P232055', { field: 'studentNumber' });
+    if (!STUDENT_NUMBER_RE.test(v)) throw errors.validation('Numéro étudiant invalide : P puis au moins 4 chiffres. Exemple : P232055', { field: 'studentNumber' });
     return v;
   }
 
@@ -237,7 +236,8 @@ export class AccountsService {
     const phone = normalizePhone(identifier);
     if (phone) return this.repo.findUserByPhone(phone);
     const number = identifier.toUpperCase().replace(/\s/g, '');
-    if (!STUDENT_NUMBER_RE.test(number)) return null;
+    // Finding an account: any number already saved (also under the previous, shorter rule).
+    if (!STORED_STUDENT_NUMBER_RE.test(number)) return null;
     const profile = await this.repo.findProfileByStudentNumber(number);
     return profile ? this.repo.findUserById(profile.userId) : null;
   }
@@ -636,14 +636,25 @@ export class AccountsService {
 
   // ---- Capability checks used by guards ------------------------------------------------------------------
 
+  /** Total students and sign-ups since midnight (Dakar is UTC, all year). */
+  async studentStats(now = this.clock.now()) {
+    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const { total, since } = await this.repo.countStudents(today);
+    return { students: total, signupsToday: since };
+  }
+
   async hasStudentProfile(userId: ObjectId) {
     return (await this.repo.findProfileByUserId(userId)) !== null;
   }
 
-  /** Read from the database, not the token: a revoked role stops working on the next request. */
+  /**
+   * Read from the database, not the token: a revoked role stops working on the next request. The super admin passes
+   * every role except the explicit ones (payments, notifications, team), which must be held themselves.
+   */
   async hasPlatformRole(userId: ObjectId, role: PlatformRole) {
     const user = await this.repo.findUserById(userId);
-    return !!user && user.status === 'active' && (user.platformRoles.includes(role) || user.platformRoles.includes('admin'));
+    if (!user || user.status !== 'active') return false;
+    return user.platformRoles.includes(role) || (!EXPLICIT_ROLES.includes(role) && user.platformRoles.includes('admin'));
   }
 }
 

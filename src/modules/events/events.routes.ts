@@ -258,6 +258,12 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
     },
   );
 
+  app.delete('/me/events/:id', { ...student, schema: { tags, params: IdParams, description: 'Off my list: never published, deleted; over, hidden (tickets kept). On sale: cancel it first.', response: { 200: Type.Object({ deleted: Type.Boolean() }) } } }, async (req) => {
+    const res = await service.remove(await myOrg(req), toObjectId(req.params.id));
+    await trace(req, 'event.remove', req.params.id, res);
+    return res;
+  });
+
   app.post(
     '/me/events/:id/cancel',
     { ...student, schema: { tags, params: IdParams, body: Type.Object({ reason: Type.String({ minLength: 3, maxLength: 200 }) }, { additionalProperties: false }), response: { 200: Type.Object({ refunded: Type.Number() }) } } },
@@ -387,6 +393,12 @@ export function registerEventsRoutes(root: FastifyInstance, { service, audit, re
     const e = await service.publish(toObjectId(req.params.orgId), toObjectId(req.params.id));
     await trace(req, 'event.publish', req.params.id);
     return service.orgEvent(e.orgId, e._id);
+  });
+
+  app.delete('/org/:orgId/events/:id', { ...org(managers), schema: { tags, params: OrgEventParams, description: 'Off the list: never published, deleted; over, hidden (tickets kept). On sale: cancel it first.', response: { 200: Type.Object({ deleted: Type.Boolean() }) } } }, async (req) => {
+    const res = await service.remove(toObjectId(req.params.orgId), toObjectId(req.params.id));
+    await trace(req, 'event.remove', req.params.id, res);
+    return res;
   });
 
   app.post(

@@ -12,6 +12,12 @@ export class AccountsRepository {
     this.profiles = db.collection<StudentProfileDoc>('studentProfiles');
   }
 
+  /** Students on the platform, and those who signed up since `since` (the team's dashboard). */
+  async countStudents(since: Date) {
+    const [total, since_] = await Promise.all([this.profiles.countDocuments({}), this.profiles.countDocuments({ createdAt: { $gte: since } })]);
+    return { total, since: since_ };
+  }
+
   insertUser(doc: UserDoc, session?: ClientSession) {
     return this.users.insertOne(doc, { session });
   }

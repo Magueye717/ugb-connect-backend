@@ -44,6 +44,8 @@ export type BannerDoc = {
   method: PaymentMethod;
   startsAt: Date;
   endsAt: Date;
+  /** Taken off the owner's « Mes publicités » (swipe), once settled: kept for the team and the accounts. */
+  removedAt?: Date;
   status: BannerStatus;
   paymentId: ObjectId | null;
   review: { by: ObjectId; at: Date; reason: string | null } | null;

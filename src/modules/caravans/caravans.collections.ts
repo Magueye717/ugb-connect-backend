@@ -2,11 +2,22 @@ import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
 import { PAYMENT_METHODS } from '../payments/index.js';
 import { TICKET_PAYMENT_METHODS } from '../ticketing/index.js';
+import { VEHICLE_MODELS } from './vehicle-models.js';
 import { BOOKING_STATUSES, DEFAULT_MAX_SEATS_PER_STUDENT, DEPARTURE_STATUSES, DIRECTIONS, MAX_SEATS_PER_STUDENT } from './caravans.types.js';
 
 const stop = bson.object({ stopId: bson.string({ minLength: 1, maxLength: 20 }), place: bson.string({ minLength: 2, maxLength: 80 }), at: bson.date }, ['stopId', 'place', 'at']);
 
 export const caravansCollections: CollectionSpec[] = [
+  {
+    name: 'vehicle_models',
+    validator: {
+      $jsonSchema: bson.object(
+        { key: bson.string({ minLength: 2, maxLength: 30 }), label: bson.string({ minLength: 2, maxLength: 60 }), kind: bson.enumOf(['bus', 'minibus']), capacity: bson.int({ minimum: 4, maximum: 90 }), layout: bson.array(bson.array({})), sortOrder: bson.int() },
+        ['key', 'label', 'kind', 'capacity', 'layout', 'sortOrder', 'createdAt'],
+      ),
+    },
+    indexes: [{ key: { key: 1 }, options: { name: 'key_unique', unique: true } }],
+  },
   {
     name: 'vehicles',
     validator: {
@@ -106,6 +117,26 @@ export const caravansCollections: CollectionSpec[] = [
 ];
 
 export const caravansMigrations: DataMigration[] = [
+  {
+    id: '2026-11-13-retire-demo-bus-64',
+    description: 'The demo « Bus 64 places » (seed plates) leave the vehicle lists: the catalog replaces them. Past and planned trips keep their snapshot.',
+    async up(db) {
+      await db.collection('vehicles').updateMany(
+        { label: 'Bus 64 places', plate: { $in: ['DK-4821-BF', 'DK-5502-BF', 'DK-7710-AZ'] }, status: 'active' },
+        { $set: { status: 'retired', updatedAt: new Date() } },
+      );
+    },
+  },
+  {
+    id: '2026-11-13-vehicle-models',
+    description: 'The vehicle catalog (buses 45, 49, 53, 57 places; Cheikhou Cherif 14 and 15 places), each with its seat plan: added when missing.',
+    async up(db) {
+      const now = new Date();
+      for (const m of VEHICLE_MODELS) {
+        await db.collection('vehicle_models').updateOne({ key: m.key }, { $setOnInsert: { ...m, createdAt: now } }, { upsert: true });
+      }
+    },
+  },
   {
     id: '2026-11-05-vehicles-air-conditioning',
     description: 'Vehicles say if they are air-conditioned (no for the existing ones, vehicle and departure snapshots); the plate becomes optional (unique when set).',

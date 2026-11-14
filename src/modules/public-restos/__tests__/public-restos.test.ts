@@ -29,7 +29,7 @@ let seq = 0;
 async function setup(day = '2026-11-02') {
   t.clock.set(Date.parse(`${day}T09:00:00Z`));
   // The super admin creates the restaurant and gives it to a menu publisher.
-  const admin = { userId: (await createStaff(t, ['admin'])).userId.toHexString() };
+  const admin = { userId: (await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender'])).userId.toHexString() };
   const staff = await createStaff(t);
   const s = { userId: staff.userId.toHexString() };
   const resto = await ok(call(admin, 'POST', '/admin/public-restos', { slug: `resto-t${++seq}-${Date.now() % 1e5}`, name: `Resto ${seq}`, location: 'Campus 1', sortOrder: seq }), 201);
@@ -83,7 +83,7 @@ describe('menus', () => {
     expect(mine).toMatchObject({ name: resto.name, services: { lunch: { start: '12:00', end: '15:00' } }, menus: { dinner: null } });
     expect(mine.menus.lunch.dishes).toHaveLength(3);
     expect((await call(student, 'PUT', `/admin/public-restos/${resto.id}/menus/${day}/dinner`, { dishes: [{ name: 'Niébé' }] })).statusCode).toBe(403);
-    const admin = await createStaff(t, ['admin']);
+    const admin = await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender']);
     await ok(call({ userId: admin.userId.toHexString() }, 'PUT', `/admin/public-restos/${resto.id}/menus/${day}/dinner`, { dishes: [{ name: 'Niébé', detail: 'Haricots · pain' }] }));
     expect((await ok(call(student, 'GET', `/public-restos?date=${day}`))).restos.find((r: { id: string }) => r.id === resto.id).menus.dinner.dishes[0].name).toBe('Niébé');
   });

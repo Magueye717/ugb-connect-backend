@@ -630,6 +630,47 @@ describe('vehicles', () => {
   });
 });
 
+describe('the vehicle catalog', () => {
+  it('buses and Cheikhou Cherif minibuses with their plans; picking one gives the organization its vehicle, once; the plan reaches students', async () => {
+    const { owner, scanner, orgId } = await setup();
+    const { models } = await ok(call(owner, 'GET', `/org/${orgId}/vehicles`));
+    expect(models.map((m: { label: string; capacity: number }) => [m.label, m.capacity])).toEqual([
+      ['Cheikhou Cherif 14 places', 13], ['Cheikhou Cherif 15 places', 14], ['Bus 45 places', 45], ['Bus 49 places', 49], ['Bus 53 places', 53], ['Bus 57 places', 57],
+    ]);
+    const bus53 = models.find((m: { key: string }) => m.key === 'bus-53');
+    // Every seat once, numbered 1..53; the door on the right after the 7th row; the back bench of 5.
+    const seats = bus53.layout.flat().filter((c: unknown) => typeof c === 'number').sort((a: number, b: number) => a - b);
+    expect(seats).toEqual(Array.from({ length: 53 }, (_, i) => i + 1));
+    expect(bus53.layout[7]).toEqual([28, 27, null, 'door', 'door']);
+    expect(bus53.layout[bus53.layout.length - 1]).toEqual([53, 52, 51, 50, 49]);
+    expect(models[0].layout[1]).toEqual([4, 3, 2, 'door']);
+
+    // A manager (here: refused to a scanner) picks it; the second time, the same vehicle.
+    expect((await call(scanner, 'POST', `/org/${orgId}/vehicles/models/bus-53`)).statusCode).toBe(404);
+    const v = await ok(call(owner, 'POST', `/org/${orgId}/vehicles/models/bus-53`));
+    expect(v).toMatchObject({ label: 'Bus 53 places', capacity: 53, model: 'bus-53', plate: null });
+    expect((await ok(call(owner, 'POST', `/org/${orgId}/vehicles/models/bus-53`))).id).toBe(v.id);
+    expect((await call(owner, 'POST', `/org/${orgId}/vehicles/models/bus-99`)).statusCode).toBe(404);
+    // Renamed and air-conditioned: its plan (and seats) stay.
+    const edited = await ok(call(owner, 'PUT', `/org/${orgId}/vehicles/${v.id}`, { label: 'Bus Khoulé 53', capacity: 20, airConditioned: true }));
+    expect(edited).toMatchObject({ label: 'Bus Khoulé 53', capacity: 53, airConditioned: true, model: 'bus-53' });
+
+    const draft = await ok(
+      call(owner, 'POST', `/org/${orgId}/departures`, {
+        vehicleId: v.id, direction: 'aller', from: 'UGB', to: 'Dakar', price: 3500, minPassengers: 0,
+        pickups: [{ place: 'UGB · Village E', at: at(5 * DAY) }], dropoffs: [{ place: 'Dakar · Colobane', at: at(5 * DAY + 5 * HOUR) }],
+      }),
+      201,
+    );
+    await ok(call(owner, 'POST', `/org/${orgId}/departures/${draft.id}/publish`));
+    const s = await registerStudent(t);
+    const map = await ok(call(s, 'GET', `/caravans/departures/${draft.id}/seats`));
+    expect(map).toMatchObject({ capacity: 53, rows: bus53.layout });
+    // « Choisis pour moi »: the front-most window seat (1, on the right of the driver).
+    expect(map.suggested).toBe(1);
+  });
+});
+
 describe('editing and deleting a vehicle', () => {
   it('a draft takes the change, a published trip keeps its vehicle; deleting waits until no trip is planned with it', async () => {
     const { owner, scanner, orgId, dep } = await setup();

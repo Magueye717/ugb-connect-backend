@@ -80,6 +80,6 @@ describe('"À la une" with a picture and a PDF', () => {
     json(await call(editor, 'PUT', `/admin/alerts/${created.id}`, { ...head, imageIds: [second.id] }));
     expect(await media.countDocuments({ _id: new ObjectId(image.id) })).toBe(0);
     expect(await media.countDocuments({ _id: new ObjectId(second.id) })).toBe(1);
-    expect(json(await call(editor, 'GET', '/admin/alerts')).limits).toEqual({ images: 3, documentMb: 10 });
+    expect(json(await call(editor, 'GET', '/admin/alerts')).limits).toEqual({ images: 3, documentMb: 25 });
   });
 });

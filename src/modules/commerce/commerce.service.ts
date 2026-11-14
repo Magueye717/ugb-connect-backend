@@ -23,10 +23,37 @@ const minutes = (hhmm: string) => {
   const [h, m] = hhmm.split(':').map(Number);
   return h! * 60 + m!;
 };
+/**
+ * Hours as people write them: a closing at « 00:00 » is midnight (24:00); a closing before the opening runs past
+ * midnight (19:00 → 02:00: two services, 19:00-24:00 and 00:00-02:00, so « open now » holds on both days). Sorted;
+ * null when a time isn't one.
+ */
+export function normalizeServices(list: Service[]): Service[] | null {
+  const out: Service[] = [];
+  for (const s of list) {
+    if (!/^\d{2}:\d{2}$/.test(s.start) || !/^\d{2}:\d{2}$/.test(s.end)) return null;
+    const a = minutes(s.start);
+    let b = minutes(s.end);
+    if (a >= 24 * 60 || b > 24 * 60 || Number(s.start.slice(3)) > 59 || Number(s.end.slice(3)) > 59) return null;
+    if (b === 0) b = 24 * 60;
+    if (a === b) return null;
+    if (b > a) out.push({ start: s.start, end: b === 24 * 60 ? '24:00' : s.end });
+    else out.push({ start: s.start, end: '24:00' }, { start: '00:00', end: s.end });
+  }
+  return out.sort((x, y) => minutes(x.start) - minutes(y.start));
+}
 /** "13:00" → "13h", "19:30" → "19h30". */
 /** « Ouvert 24h/24 » (a shop): one service from midnight to midnight. */
 const allDay = (services: Service[]) => services.length === 1 && services[0]!.start === '00:00' && services[0]!.end === '24:00';
 const hourLabel = (hhmm: string) => hhmm.replace(/^0/, '').replace(':00', 'h').replace(':', 'h');
+/** « 12h-15h · 19h-2h »: a service past midnight (…-24:00 then 00:00-…) said as one. */
+const hoursLabel = (services: Service[]) => {
+  const list = [...services];
+  const late = list.find((s) => s.end === '24:00' && s.start !== '00:00');
+  const early = list.find((s) => s.start === '00:00' && s.end !== '24:00');
+  const shown = late && early ? [...list.filter((s) => s !== late && s !== early), { start: late.start, end: early.end }] : list;
+  return shown.map((s) => `${hourLabel(s.start)}-${s.end === '24:00' ? 'minuit' : hourLabel(s.end)}`).join(' · ');
+};
 /** Where to see a new order (business space) and to follow mine (student). */
 const BUSINESS_ORDER_URL = (id: ObjectId) => `/commande-recue/${id.toHexString()}`;
 const MY_ORDER_URL = (id: ObjectId) => `/commande/${id.toHexString()}`;
@@ -258,9 +285,9 @@ export class CommerceService {
     if (input.campus !== undefined) set.campus = input.campus;
     if (input.phone !== undefined) set.phone = localPhone(this.accounts.phoneOrThrow(input.phone));
     if (input.services !== undefined) {
-      const ok = input.services.every((s) => /^\d{2}:\d{2}$/.test(s.start) && /^\d{2}:\d{2}$/.test(s.end) && minutes(s.start) < minutes(s.end) && minutes(s.end) <= 24 * 60);
-      if (!ok || !input.services.length) throw errors.validation('Horaires invalides : de 08:00 à 15:00 par exemple.', { field: 'services' });
-      set.services = [...input.services].sort((a, b2) => minutes(a.start) - minutes(b2.start));
+      const services = normalizeServices(input.services);
+      if (!services || !input.services.length) throw errors.validation('Horaires invalides : de 08:00 à 15:00 par exemple (00:00 pour minuit).', { field: 'services' });
+      set.services = services;
     }
     if (input.deliveryFees !== undefined) set.deliveryFees = { ...NO_DELIVERY, ...input.deliveryFees };
     if (input.acceptingOrders !== undefined) set.acceptingOrders = input.acceptingOrders;
@@ -535,7 +562,7 @@ export class CommerceService {
       campusLabel: b.campus ? CAMPUS_LABELS[b.campus] : null,
       phone: b.phone,
       services: b.services,
-      hours: allDay(b.services) ? '24h/24' : b.services.map((s) => `${hourLabel(s.start)}-${hourLabel(s.end)}`).join(' · '),
+      hours: allDay(b.services) ? '24h/24' : hoursLabel(b.services),
       open: st.open,
       statusLabel: st.label,
       deliveryFees: b.deliveryFees,

@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +103,11 @@ describe('a found student card', () => {
     expect(pieces).toEqual(expect.arrayContaining(['Fatou Ndiaye', 'Aminata Ndiaye']));
     expect((await ok(call(finder, 'GET', '/lost/cards/search?q=zzqx'))).items).toEqual([]);
     expect((await ok(call(finder, 'GET', `/lost/cards/lookup?number=${fatou.studentNumber.toLowerCase()}`))).owner.ref).toBe(fatou.userId);
+    // Matched by its number: the owner is told at once (before any declaration), once a day per finder.
+    expect((await ok(call(finder, 'GET', `/lost/cards/lookup?number=${fatou.studentNumber}`))).owner.ref).toBe(fatou.userId);
+    const scanned = await t.c.mongo.db.collection('notifications').find({ userId: new ObjectId(fatou.userId), type: 'lost.card_scanned' }).toArray();
+    expect(scanned).toHaveLength(1);
+    expect(scanned[0]!.title).toBe('Ta carte étudiant a été retrouvée');
     expect((await ok(call(finder, 'GET', '/lost/cards/lookup?number=P000001'))).owner).toBeNull();
     expect((await call(finder, 'GET', '/lost/cards/lookup?number=12345678')).statusCode).toBe(400);
     // One's own card isn't "found".

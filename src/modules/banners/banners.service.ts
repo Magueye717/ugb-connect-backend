@@ -175,7 +175,21 @@ export class BannersService {
   }
 
   mine(ownerId: ObjectId) {
-    return this.banners.find({ ownerId }).sort({ createdAt: -1 }).limit(50).toArray();
+    return this.banners.find({ ownerId, removedAt: { $exists: false } }).sort({ createdAt: -1 }).limit(50).toArray();
+  }
+
+  /**
+   * « Supprimer » from « Mes publicités » (swipe): only once it's settled (refused, cancelled, withdrawn, or its
+   * diffusion over). Taken off the owner's list only: the paid record stays for the team and the accounts.
+   * Waiting (payment, review): cancel it first (refunded). Showing now: it runs to its end.
+   */
+  async remove(ownerId: ObjectId, id: ObjectId) {
+    const b = await this.banners.findOne({ _id: id, ownerId });
+    if (!b) throw errors.notFound('Bannière introuvable.');
+    const now = this.clock.now();
+    if (b.status === 'pending_payment' || b.status === 'pending_review') throw errors.conflict('BANNER_PENDING', 'Annule d’abord cette bannière (elle t’est remboursée si tu l’as payée).');
+    if (b.status === 'approved' && b.endsAt > now) throw errors.conflict('BANNER_RUNNING', 'Cette bannière est en diffusion : elle disparaît de ta liste après sa fin.');
+    await this.banners.updateOne({ _id: id, ownerId }, { $set: { removedAt: now, updatedAt: now } });
   }
 
   /** Before the review: given up, refunded. Unpaid: the slot goes back. */

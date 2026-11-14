@@ -4,7 +4,7 @@ import type { Clock } from '../../platform/clock.js';
 import { isDuplicateKey, withTransaction } from '../../platform/db/mongo.js';
 import { errors } from '../../platform/http/errors.js';
 import type { Limiter } from '../../platform/security/limiter.js';
-import { CAMPUS_LABELS, STUDENT_NUMBER_RE, type AccountsApi, type StudentCard } from '../accounts/index.js';
+import { CAMPUS_LABELS, STORED_STUDENT_NUMBER_RE, type AccountsApi, type StudentCard } from '../accounts/index.js';
 import type { AlertsApi } from '../alerts/index.js';
 import type { MediaApi } from '../media/index.js';
 import type { ConversationMember, MessagingApi } from '../messaging/index.js';
@@ -332,6 +332,7 @@ export class LostService {
     const owner = studentNumber ? await this.accounts.studentByNumber(studentNumber) : null;
     // Without the number: only students with two of the names read (first and last name), never a single stray word.
     const candidates = owner || names.length < 2 ? [] : await this.accounts.searchStudents(names, 20, 2);
+    if (owner) await this.warnOwnerEarly(userId, owner.userId);
     return { cardType, studentNumber, names, owner: owner ? this.match(owner) : null, candidates: candidates.filter((c) => !c.userId.equals(userId)).map((c) => this.match(c)) };
   }
 
@@ -365,9 +366,27 @@ export class LostService {
   async lookupCard(userId: ObjectId, number: string) {
     await this.limiter.hit(`lost-card-lookup:${userId.toHexString()}`, { limit: 30, windowS: 3600 });
     const n = number.toUpperCase().replace(/\s/g, '');
-    if (!STUDENT_NUMBER_RE.test(n)) throw errors.validation('Numéro étudiant invalide : P puis des chiffres, 4 caractères au moins. Exemple : P232055', { field: 'number' });
+    // A found card: any number already given (also under the previous, shorter rule).
+    if (!STORED_STUDENT_NUMBER_RE.test(n)) throw errors.validation('Numéro étudiant invalide : P puis au moins 4 chiffres. Exemple : P232055', { field: 'number' });
     const owner = await this.accounts.studentByNumber(n);
+    if (owner) await this.warnOwnerEarly(userId, owner.userId);
     return { studentNumber: n, owner: owner ? this.match(owner) : null };
+  }
+
+  /**
+   * A card just matched its owner by its number (scanned or typed): they're told at once, before the finder even
+   * saves the declaration, which then sends the second message (who, where, the chat). Once a day per finder and
+   * owner: scanning again or retyping doesn't repeat it. Nothing about the finder yet.
+   */
+  private async warnOwnerEarly(finderId: ObjectId, ownerId: ObjectId) {
+    if (ownerId.equals(finderId)) return;
+    const day = this.clock.now().toISOString().slice(0, 10);
+    await this.notifications.notify([ownerId], {
+      type: 'lost.card_scanned', category: 'social', icon: 'card-outline', tone: 'warning', url: '/(tabs)/lieux?vue=objets',
+      dedupeKey: `lost-card-scan:${finderId.toHexString()}:${ownerId.toHexString()}:${day}`,
+      title: 'Ta carte étudiant a été retrouvée',
+      body: 'Un étudiant vient de la scanner et la signale en ce moment. Tu recevras un second message avec où elle est et comment la récupérer.',
+    });
   }
 
   /** Typed name, when the number can't be read: the students it may be. */

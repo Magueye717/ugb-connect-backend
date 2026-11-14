@@ -21,7 +21,9 @@ export type { FileRef, MediaUsage } from './media.types.js';
 export const MEDIA_SWEEP_QUEUE = 'media.sweep';
 
 /** Uploaded files above this are refused before being read. */
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** The campus team's directory editors and the admins: no hourly limit on uploads. */
+const UNLIMITED_ROLES = ['admin', 'place_editor', 'restaurant_editor', 'shop_editor', 'caravan_editor'];
 
 export type MediaApi = Pick<MediaService, 'claim' | 'claimDocument' | 'release' | 'trackUsage'> & {
   registerRoutes(app: FastifyInstance): Promise<void>;
@@ -47,7 +49,7 @@ export function createMediaModule(d: { db: Db; clock: Clock; config: Config; lim
         schema: {
           tags: ['media'],
           consumes: ['multipart/form-data'],
-          description: 'Upload one picture (field `file`, up to 10 MB: JPEG, PNG, WebP, HEIC). It comes back re-encoded (WebP, ≤ 1600 px, no metadata); attach it by `id`.',
+          description: 'Upload one picture (field `file`, up to 25 MB: JPEG, PNG, WebP, HEIC, AVIF, GIF, TIFF). It comes back re-encoded (WebP, ≤ 1600 px, no metadata); attach it by `id`.',
           querystring: Type.Object({ purpose: Type.Enum(MEDIA_PURPOSES) }, { additionalProperties: false }),
           response: { 201: Type.Object({ id: Type.String(), url: Type.String(), width: Type.Number(), height: Type.Number() }) },
         },
@@ -58,7 +60,8 @@ export function createMediaModule(d: { db: Db; clock: Clock; config: Config; lim
         const buf = await file.toBuffer().catch(() => {
           throw errors.validation(`Image trop lourde : ${MAX_UPLOAD_BYTES / 1024 / 1024} Mo au plus.`, { field: 'file' });
         });
-        const doc = await service.upload(toObjectId(actorOf(req).userId), req.query.purpose, buf, apiBase(req));
+        const actor = actorOf(req);
+        const doc = await service.upload(toObjectId(actor.userId), req.query.purpose, buf, apiBase(req), { unlimited: actor.roles.some((r) => UNLIMITED_ROLES.includes(r)) });
         return reply.status(201).send({ id: doc._id.toHexString(), url: doc.url, width: doc.width!, height: doc.height! });
       },
     );

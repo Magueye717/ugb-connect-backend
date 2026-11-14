@@ -404,3 +404,25 @@ describe('students’ events', () => {
   });
 });
 
+
+describe('deleting from « Mes événements »', () => {
+  it('never published: deleted; on sale: cancel first; cancelled: off the list, kept', async () => {
+    const e = await setup();
+    const draft = await ok(call(e.owner, 'POST', `/org/${e.orgId}/events`, e.body), 201);
+    expect(await ok(call(e.owner, 'DELETE', `/org/${e.orgId}/events/${draft.id}`))).toEqual({ deleted: true });
+    expect((await call(e.owner, 'GET', `/org/${e.orgId}/events/${draft.id}`)).statusCode).toBe(404);
+
+    // Its photos were released with it: the next event brings its own.
+    const fresh = await setup();
+    Object.assign(e, fresh);
+    const live = await ok(call(e.owner, 'POST', `/org/${e.orgId}/events`, { ...e.body, title: 'Concert' }), 201);
+    await ok(call(e.owner, 'POST', `/org/${e.orgId}/events/${live.id}/publish`));
+    expect(json(await call(e.owner, 'DELETE', `/org/${e.orgId}/events/${live.id}`)).code).toBe('EVENT_LIVE');
+    await ok(call(e.owner, 'POST', `/org/${e.orgId}/events/${live.id}/cancel`, { reason: 'Salle indisponible' }));
+    expect(await ok(call(e.owner, 'DELETE', `/org/${e.orgId}/events/${live.id}`))).toEqual({ deleted: false });
+    expect((await ok(call(e.owner, 'GET', `/org/${e.orgId}/events`))).items.some((x: { id: string }) => x.id === live.id)).toBe(false);
+    // Someone else's organization: not theirs to delete.
+    const other = await setup();
+    expect([403, 404]).toContain((await call(other.owner, 'DELETE', `/org/${e.orgId}/events/${live.id}`)).statusCode);
+  });
+});

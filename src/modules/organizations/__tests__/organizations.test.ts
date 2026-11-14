@@ -7,7 +7,7 @@ let t: TestApp;
 let admin: Awaited<ReturnType<typeof createStaff>>;
 beforeAll(async () => {
   t = await createTestApp();
-  admin = await createStaff(t, ['admin']);
+  admin = await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender']);
 });
 afterAll(async () => {
   await t.close();
@@ -31,7 +31,7 @@ describe('admin back office', () => {
   });
 
   it('a revoked platform role stops working on the next request', async () => {
-    const other = await createStaff(t, ['admin']);
+    const other = await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender']);
     expect((await call('GET', '/admin/organizations', other.tokens.accessToken)).statusCode).toBe(200);
     await call('PUT', `/admin/users/${other.userId.toHexString()}/platform-roles`, admin.tokens.accessToken, { roles: [] });
     expect((await call('GET', '/admin/organizations', other.tokens.accessToken)).statusCode).toBe(403);

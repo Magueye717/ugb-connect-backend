@@ -21,7 +21,7 @@ describe('deploy bootstrap', () => {
     const db = t.c.mongo.db;
     expect(await ensureBootstrapAdmin(db, t.clock, admin)).toBe('created');
     const user = await db.collection('users').findOne({ phone: '+221770000000' });
-    expect(user).toMatchObject({ platformRoles: ['admin'], status: 'active' });
+    expect(user).toMatchObject({ platformRoles: ['admin', 'payments_manager', 'notifications_sender', 'team_manager'], status: 'active' });
 
     const login = await t.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { identifier: '770000000', password: 'Caampus2026' } });
     expect(login.statusCode, login.body).toBe(200);

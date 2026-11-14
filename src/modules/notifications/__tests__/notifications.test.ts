@@ -66,7 +66,7 @@ describe('in-app list and push', () => {
 
   it('an admin can notify one account (testing push on a phone)', async () => {
     const s = await registerStudent(t);
-    const admin = await createStaff(t, ['admin']);
+    const admin = await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender']);
     const res = await t.app.inject({
       method: 'POST', url: '/api/v1/admin/notifications', headers: bearer(admin.tokens.accessToken),
       payload: { phone: s.phone, title: 'Test push', body: 'Ça marche', category: 'social' },

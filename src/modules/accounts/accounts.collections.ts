@@ -1,6 +1,6 @@
 import type { DataMigration } from '../../platform/db/migrations.js';
 import { bson, type CollectionSpec } from '../../platform/db/schema.js';
-import { CAMPUSES, PLATFORM_ROLES, REGIONS, STUDENT_NUMBER_RE, UFR_CODES } from './accounts.types.js';
+import { CAMPUSES, PLATFORM_ROLES, REGIONS, STORED_STUDENT_NUMBER_RE, UFR_CODES } from './accounts.types.js';
 
 export const accountsCollections: CollectionSpec[] = [
   {
@@ -41,8 +41,8 @@ export const accountsCollections: CollectionSpec[] = [
       $jsonSchema: bson.object(
         {
           userId: bson.objectId,
-          // The same rule as the API (STUDENT_NUMBER_RE): P then digits, 4 to 20 characters.
-          studentNumber: bson.nullable(bson.string({ pattern: STUDENT_NUMBER_RE.source })),
+          // Looser than the API (STUDENT_NUMBER_RE, P + 4 digits or more): numbers saved under the previous rule stay valid.
+          studentNumber: bson.nullable(bson.string({ pattern: STORED_STUDENT_NUMBER_RE.source })),
           campus: bson.enumOf(CAMPUSES),
           onCampus: bson.bool,
           village: { bsonType: ['string', 'null'] },
@@ -69,6 +69,16 @@ export const accountsCollections: CollectionSpec[] = [
 ];
 
 export const accountsMigrations: DataMigration[] = [
+  {
+    id: '2026-11-13-explicit-admin-roles',
+    description: 'Payments switches, notifications and the team become roles of their own (the super admin role no longer includes them): the current super admins keep them.',
+    async up(db) {
+      await db.collection('users').updateMany(
+        { platformRoles: 'admin', status: { $ne: 'deleted' } },
+        { $addToSet: { platformRoles: { $each: ['payments_manager', 'notifications_sender', 'team_manager'] } }, $set: { updatedAt: new Date() } },
+      );
+    },
+  },
   {
     id: '2026-11-06-student-number-optional',
     description: 'The student number becomes optional (added after sign-up): unique only when set; the old unique index goes.',

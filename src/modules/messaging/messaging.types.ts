@@ -4,7 +4,7 @@ import type { ObjectId } from 'mongodb';
  * Every feature that has conversations. Messaging knows nothing about taxis or lost items: the owning module
  * creates the conversation, keeps its member list up to date and posts system lines.
  */
-export const CONVERSATION_TYPES = ['taxi_trip', 'lost_claim'] as const;
+export const CONVERSATION_TYPES = ['taxi_trip', 'lost_claim', 'housing_contact'] as const;
 export type ConversationType = (typeof CONVERSATION_TYPES)[number];
 
 /**

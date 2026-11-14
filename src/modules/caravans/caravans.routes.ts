@@ -9,7 +9,7 @@ import type { OrgRole } from '../organizations/index.js';
 import { PAYMENT_METHODS, PaymentView, paymentView, PayoutView, payoutView } from '../payments/index.js';
 import { TICKET_PAYMENT_METHODS } from '../ticketing/index.js';
 import type { CaravansService } from './caravans.service.js';
-import { DEFAULT_MAX_SEATS_PER_STUDENT, DIRECTIONS, MAX_SEATS_PER_STUDENT } from './caravans.types.js';
+import { DEFAULT_MAX_SEATS_PER_STUDENT, DIRECTIONS, MAX_SEATS_PER_STUDENT, type VehicleDoc } from './caravans.types.js';
 
 const StopView = Type.Object({ stopId: Type.String(), place: Type.String(), at: Type.String() });
 const Organizer = Type.Object({ id: Type.String(), slug: Type.String(), name: Type.String(), category: Type.String(), level: Type.String(), rating: Nullable(Type.Number()), trips: Type.Number(), logoUrl: Nullable(Type.String()) });
@@ -127,7 +127,14 @@ const DepartureInput = Type.Object(
   },
   { additionalProperties: false },
 );
-const VehicleView = Type.Object({ id: Type.String(), label: Type.String(), plate: Nullable(Type.String()), airConditioned: Type.Boolean(), capacity: Type.Number(), seatsPerRow: Type.Number(), blockedSeats: Type.Array(Type.Number()) });
+/** A seat plan, front row first: a seat number, the driver, the door, or nothing (aisle, empty space). */
+const SeatLayout = Type.Array(Type.Array(Type.Union([Type.Integer(), Type.Literal('driver'), Type.Literal('door'), Type.Null()])));
+const VehicleView = Type.Object({
+  id: Type.String(), label: Type.String(), plate: Nullable(Type.String()), airConditioned: Type.Boolean(), capacity: Type.Number(), seatsPerRow: Type.Number(), blockedSeats: Type.Array(Type.Number()),
+  model: Nullable(Type.String({ description: 'Catalog model ("bus-53"): its plan is `layout`.' })),
+  layout: Nullable(SeatLayout),
+});
+const VehicleModelView = Type.Object({ key: Type.String(), label: Type.String(), kind: Type.Union([Type.Literal('bus'), Type.Literal('minibus')]), capacity: Type.Number(), layout: SeatLayout });
 
 const OrgParams = Type.Object({ orgId: ObjectIdString }, { additionalProperties: false });
 const OrgDepParams = Type.Object({ orgId: ObjectIdString, id: ObjectIdString }, { additionalProperties: false });
@@ -174,7 +181,7 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
       schema: {
         tags,
         params: IdParams,
-        response: { 200: Type.Object({ capacity: Type.Number(), seatsPerRow: Type.Number(), firstRowSeats: Type.Number({ description: 'Seats of the first row, on the right; then full rows. Numbered from the front.' }), blocked: Type.Array(Type.Number()), taken: Type.Array(Type.Number()), suggested: Nullable(Type.Number()) }) },
+        response: { 200: Type.Object({ capacity: Type.Number(), seatsPerRow: Type.Number(), firstRowSeats: Type.Number({ description: 'Seats of the first row, on the right; then full rows. Numbered from the front.' }), blocked: Type.Array(Type.Number()), rows: Nullable(SeatLayout), taken: Type.Array(Type.Number()), suggested: Nullable(Type.Number()) }) },
       },
     },
     async (req) => service.seatMap(toObjectId(req.params.id)),
@@ -326,8 +333,9 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
 
   // ---- Organizer: vehicles and departures (created from the organizer space of the app) -----------------------
 
-  const vehicleView = (v: { _id: { toHexString(): string }; label: string; plate: string | null; airConditioned: boolean; capacity: number; seatsPerRow: number; blockedSeats: number[] }) => ({
+  const vehicleView = (v: VehicleDoc) => ({
     id: v._id.toHexString(), label: v.label, plate: v.plate, airConditioned: v.airConditioned, capacity: v.capacity, seatsPerRow: v.seatsPerRow, blockedSeats: v.blockedSeats,
+    model: v.model ?? null, layout: v.layout ?? null,
   });
 
   const Limits = Type.Object(
@@ -336,9 +344,10 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
   );
   app.get(
     '/org/:orgId/vehicles',
-    { ...org(managers), schema: { tags: orgTags, params: OrgParams, response: { 200: Type.Object({ items: Type.Array(VehicleView), limits: Limits }) } } },
+    { ...org(managers), schema: { tags: orgTags, params: OrgParams, response: { 200: Type.Object({ items: Type.Array(VehicleView), models: Type.Array(VehicleModelView, { description: 'The catalog: pick one to get its vehicle (POST …/vehicles/models/:key).' }), limits: Limits }) } } },
     async (req) => ({
       items: (await service.listVehicles(toObjectId(req.params.orgId))).map(vehicleView),
+      models: (await service.listModels()).map((m) => ({ key: m.key, label: m.label, kind: m.kind, capacity: m.capacity, layout: m.layout })),
       limits: { maxSeatsPerStudent: MAX_SEATS_PER_STUDENT, defaultSeatsPerStudent: DEFAULT_MAX_SEATS_PER_STUDENT },
     }),
   );
@@ -365,6 +374,20 @@ export function registerCaravansRoutes(root: FastifyInstance, { service, audit, 
       },
     },
     async (req, reply) => reply.status(201).send(vehicleView(await service.createVehicle(toObjectId(req.params.orgId), req.body))),
+  );
+
+  app.post(
+    '/org/:orgId/vehicles/models/:key',
+    {
+      ...org(managers),
+      schema: {
+        tags: orgTags,
+        description: 'The organization’s vehicle for this catalog model: the existing one, or a new one with its name and seat plan.',
+        params: Type.Object({ orgId: ObjectIdString, key: Type.String({ pattern: '^[a-z0-9-]{2,30}$' }) }, { additionalProperties: false }),
+        response: { 200: VehicleView },
+      },
+    },
+    async (req) => vehicleView(await service.vehicleFromModel(toObjectId(req.params.orgId), req.params.key)),
   );
 
   const OrgVehicleParams = Type.Object({ orgId: ObjectIdString, id: ObjectIdString }, { additionalProperties: false });

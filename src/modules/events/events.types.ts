@@ -46,6 +46,8 @@ export type EventDoc = {
   venue: { name: string; address: string | null };
   startsAt: Date;
   endsAt: Date;
+  /** Taken off the organizer's list (« Supprimer », once over): kept for its tickets and history. */
+  removedAt?: Date;
   salesCloseAt: Date;
   ticketTypes: TicketType[];
   /** Tickets one student can buy for this event, all orders together (for friends too). */

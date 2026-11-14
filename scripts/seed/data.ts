@@ -108,10 +108,11 @@ const toDakar: SeedStop[] = [['Louga · Station Total', 130], ['Kébémer · Car
 const fromDakar: SeedStop[] = [['Dakar · École normale', 0], ['Pikine · Station Total Bountou', 30], ['Fass Mbao · Arrêt ICS', 45], ['Rufisque · En face Sococim', 70], ['Diamniadio · Hôpital des enfants', 90], ['Thiès · Mairie', 135], ['Tivaouane · EDK', 165], ['Louga · Station Total', 225]];
 const toUgb: SeedStop[] = [['UGB · Entrée principale', 300], ['UGB · Village E', 310]];
 
-export const vehicles: { org: string; label: string; plate: string; capacity: number; airConditioned?: boolean }[] = [
-  { org: 'khoule', label: 'Bus 64 places', plate: 'DK-4821-BF', capacity: 64, airConditioned: true },
-  { org: 'khoule', label: 'Bus 64 places', plate: 'DK-5502-BF', capacity: 64 },
-  { org: 'globe', label: 'Bus 64 places', plate: 'DK-7710-AZ', capacity: 64, airConditioned: true },
+/** `model`: a vehicle of the catalog (its name, seats and plan come from it). */
+export const vehicles: { org: string; label: string; plate: string; capacity: number; airConditioned?: boolean; model?: string }[] = [
+  { org: 'khoule', label: 'Bus 57 places', plate: 'DK-4822-BF', capacity: 57, airConditioned: true, model: 'bus-57' },
+  { org: 'khoule', label: 'Bus 53 places', plate: 'DK-5503-BF', capacity: 53, model: 'bus-53' },
+  { org: 'globe', label: 'Bus 57 places', plate: 'DK-7711-AZ', capacity: 57, airConditioned: true, model: 'bus-57' },
   { org: 'amicale-zig', label: 'Bus 60 places', plate: 'ZG-1934-BC', capacity: 60 },
   { org: 'ndar', label: 'Minibus 32 places', plate: 'SL-2207-AC', capacity: 32 },
 ];
@@ -123,15 +124,15 @@ export const departures: {
   price: number; minPassengers: number; confirmByMinutesBefore?: number; tickets?: [phone: string, pickup: number, dropoff: number][];
 }[] = [
   // Leaves soon: boarding is open (3 h before) for the organizer demo.
-  { plate: 'DK-5502-BF', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 2 * H, pickups: ugbPickups, dropoffs: [toDakar[3]!, toDakar[6]!], price: 3500, minPassengers: 2, confirmByMinutesBefore: 60, tickets: [['771234567', 0, 1], ['781112233', 2, 0], ['761234500', 0, 1]] },
-  { plate: 'DK-4821-BF', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 2 * D + 4 * H + 37, pickups: ugbPickups, dropoffs: toDakar, price: 3500, minPassengers: 40, tickets: [['771234567', 0, 6]] },
+  { plate: 'DK-5503-BF', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 2 * H, pickups: ugbPickups, dropoffs: [toDakar[3]!, toDakar[6]!], price: 3500, minPassengers: 2, confirmByMinutesBefore: 60, tickets: [['771234567', 0, 1], ['781112233', 2, 0], ['761234500', 0, 1]] },
+  { plate: 'DK-4822-BF', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 2 * D + 4 * H + 37, pickups: ugbPickups, dropoffs: toDakar, price: 3500, minPassengers: 40, tickets: [['771234567', 0, 6]] },
   { plate: 'SL-2207-AC', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 2 * D + 5 * H + 17, pickups: ugbPickups.slice(0, 2), dropoffs: toDakar.slice(3), price: 3000, minPassengers: 22 },
-  { plate: 'DK-7710-AZ', direction: 'aller', from: 'UGB', to: 'Ziguinchor', inMinutes: 2 * D + 5 * H, pickups: ugbPickups, dropoffs: [['Kaolack · Gare routière', 250], ['Bignona · Carrefour', 560], ['Ziguinchor · Gare routière', 600]], price: 3500, minPassengers: 40 },
+  { plate: 'DK-7711-AZ', direction: 'aller', from: 'UGB', to: 'Ziguinchor', inMinutes: 2 * D + 5 * H, pickups: ugbPickups, dropoffs: [['Kaolack · Gare routière', 250], ['Bignona · Carrefour', 560], ['Ziguinchor · Gare routière', 600]], price: 3500, minPassengers: 40 },
   { plate: 'ZG-1934-BC', direction: 'aller', from: 'UGB', to: 'Ziguinchor', inMinutes: 3 * D + H, pickups: ugbPickups.slice(0, 1), dropoffs: [['Ziguinchor · Gare routière', 600], ['Ziguinchor · Boucotte', 615], ['Ziguinchor · Lyndiane', 625]], price: 3200, minPassengers: 40, tickets: [['761234500', 0, 1]] },
-  { plate: 'DK-4821-BF', direction: 'retour', from: 'Dakar', to: 'UGB', inMinutes: 6 * D + 6 * H, pickups: fromDakar, dropoffs: toUgb, price: 3500, minPassengers: 40, tickets: [['781112233', 5, 1]] },
-  { plate: 'DK-7710-AZ', direction: 'retour', from: 'Ziguinchor', to: 'UGB', inMinutes: 5 * D + 22 * H, pickups: [['Ziguinchor · Gare routière', 0], ['Bignona · Carrefour', 40]], dropoffs: [['UGB · Entrée principale', 600], ['UGB · Village E', 610]], price: 3500, minPassengers: 40 },
-  { plate: 'DK-7710-AZ', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 4 * D + H, pickups: ugbPickups, dropoffs: [toDakar[3]!, toDakar[5]!, toDakar[6]!], price: 3500, minPassengers: 40 },
-  { plate: 'DK-5502-BF', direction: 'aller', from: 'UGB', to: 'Kaolack', inMinutes: 5 * D + 3 * H, pickups: [['UGB · Entrée principale', 0]], dropoffs: [['Louga · Station Total', 130], ['Diourbel · Gare routière', 230], ['Kaolack · Gare routière', 290]], price: 3000, minPassengers: 40 },
+  { plate: 'DK-4822-BF', direction: 'retour', from: 'Dakar', to: 'UGB', inMinutes: 6 * D + 6 * H, pickups: fromDakar, dropoffs: toUgb, price: 3500, minPassengers: 40, tickets: [['781112233', 5, 1]] },
+  { plate: 'DK-7711-AZ', direction: 'retour', from: 'Ziguinchor', to: 'UGB', inMinutes: 5 * D + 22 * H, pickups: [['Ziguinchor · Gare routière', 0], ['Bignona · Carrefour', 40]], dropoffs: [['UGB · Entrée principale', 600], ['UGB · Village E', 610]], price: 3500, minPassengers: 40 },
+  { plate: 'DK-7711-AZ', direction: 'aller', from: 'UGB', to: 'Dakar', inMinutes: 4 * D + H, pickups: ugbPickups, dropoffs: [toDakar[3]!, toDakar[5]!, toDakar[6]!], price: 3500, minPassengers: 40 },
+  { plate: 'DK-5503-BF', direction: 'aller', from: 'UGB', to: 'Kaolack', inMinutes: 5 * D + 3 * H, pickups: [['UGB · Entrée principale', 0]], dropoffs: [['Louga · Station Total', 130], ['Diourbel · Gare routière', 230], ['Kaolack · Gare routière', 290]], price: 3000, minPassengers: 40 },
 ];
 
 const DAYS_FR = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];

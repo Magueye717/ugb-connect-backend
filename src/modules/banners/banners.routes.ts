@@ -125,6 +125,11 @@ export function registerBannersRoutes(root: FastifyInstance, { service, audit, r
     items: await Promise.all((await service.mine(me(req))).map(view)),
   }));
 
+  app.delete('/me/banners/:id', { preHandler: requireAuth, schema: { tags, params: IdParams, description: 'Off my list once settled (refused, cancelled, withdrawn, ended). Waiting: cancel first; showing: not yet.' } }, async (req, reply) => {
+    await service.remove(me(req), toObjectId(req.params.id));
+    return reply.status(204).send();
+  });
+
   app.post('/me/banners/:id/cancel', { preHandler: requireAuth, schema: { tags, params: IdParams, response: { 200: BannerView } } }, async (req) => view(await service.cancel(me(req), toObjectId(req.params.id))));
 
   // ---- Communication team ----------------------------------------------------------------------------------------

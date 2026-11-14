@@ -18,6 +18,7 @@ import { mediaCollections } from './modules/media/index.js';
 import { eventsCollections, eventsMigrations } from './modules/events/index.js';
 import { bannersCollections } from './modules/banners/index.js';
 import { publicRestosCollections, publicRestosMigrations } from './modules/public-restos/index.js';
+import { housingCollections } from './modules/housing/index.js';
 import { lostCollections } from './modules/lost/index.js';
 import { commerceCollections, commerceMigrations } from './modules/commerce/index.js';
 import { placesCollections, placesMigrations } from './modules/places/index.js';
@@ -26,7 +27,7 @@ import { ratingsCollections, ratingsMigrations } from './modules/ratings/index.j
 /** Every collection the application owns: validators and indexes. */
 export const allCollections: CollectionSpec[] = [
   ...auditCollections, ...accountsCollections, ...identityCollections, ...organizationsCollections, ...paymentsCollections, ...messagingCollections, ...taxiCollections,
-  ...ticketingCollections, ...caravansCollections, ...notificationsCollections, ...alertsCollections, ...publicRestosCollections, ...mediaCollections, ...eventsCollections, ...bannersCollections, ...lostCollections, ...commerceCollections, ...placesCollections, ...ratingsCollections,
+  ...ticketingCollections, ...caravansCollections, ...notificationsCollections, ...alertsCollections, ...publicRestosCollections, ...mediaCollections, ...eventsCollections, ...bannersCollections, ...lostCollections, ...housingCollections, ...commerceCollections, ...placesCollections, ...ratingsCollections,
 ];
 
 /** One-time data changes, in the order they were written. */

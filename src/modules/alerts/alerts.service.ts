@@ -125,7 +125,7 @@ export class AlertsService {
   async update(id: ObjectId, input: Omit<AlertInput, 'kind'>, editor: Editor) {
     const a = await this.alerts.findOne({ _id: id });
     if (!a) throw errors.notFound('Alerte introuvable.');
-    if (a.kind === 'resto_stock') throw errors.conflict('ALERT_FOLLOWS_STOCK', 'Cette alerte suit le stock du restaurant : elle se modifie depuis « Restos publics ».');
+    if (a.kind === 'resto_stock') throw errors.conflict('ALERT_FOLLOWS_STOCK', 'Cette alerte suit le stock du restaurant : elle se modifie depuis « Menus du jour ».');
     if (!canEdit(editor, a.kind)) throw errors.forbidden('Cette annonce est gérée par une autre équipe.');
     const status = this.status(a);
     if (status === 'ended' || status === 'withdrawn') throw errors.conflict('ALERT_CLOSED', 'Cette alerte est terminée ou retirée.');

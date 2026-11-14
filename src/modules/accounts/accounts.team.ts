@@ -78,7 +78,7 @@ export class PlatformTeam {
         user = await this.accounts.createStaffUser({ phone, firstName: input.firstName, lastName: input.lastName, password: input.password });
       }
     }
-    if (user._id.equals(by) && !roles.includes('admin')) throw errors.forbidden('Tu ne peux pas retirer ton propre rôle d’administrateur.');
+    if (user._id.equals(by) && !roles.includes('team_manager')) throw errors.forbidden('Tu ne peux pas retirer ton propre rôle de gestion de l’équipe.');
     const before = user.platformRoles;
     await this.users.updateOne({ _id: user._id }, { $set: { platformRoles: roles, restoIds, updatedAt: this.clock.now() } });
     const added = roles.filter((r) => !before.includes(r));

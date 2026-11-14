@@ -1,6 +1,7 @@
 import type { ObjectId } from 'mongodb';
 
 import type { TicketPaymentMethod } from '../ticketing/index.js';
+import type { SeatLayout } from './vehicle-models.js';
 
 export const DIRECTIONS = ['aller', 'retour'] as const;
 export type Direction = (typeof DIRECTIONS)[number];
@@ -20,6 +21,10 @@ export type VehicleDoc = {
   seatsPerRow: number;
   /** Seats never sold (driver's helper, broken seat). */
   blockedSeats: number[];
+  /** From the catalog ("bus-53"): its plan is `layout`. Null: one the organizer described (rows of `seatsPerRow`). */
+  model?: string | null;
+  /** The seat plan, front first; null: drawn from `capacity` and `seatsPerRow`. */
+  layout?: SeatLayout | null;
   status: 'active' | 'retired';
   createdAt: Date;
   updatedAt: Date;
@@ -42,7 +47,7 @@ export type DepartureDoc = {
   orgId: ObjectId;
   vehicleId: ObjectId;
   /** Snapshot at publication: later edits to the vehicle don't change a sold trip. */
-  vehicle: { label: string; plate: string | null; airConditioned: boolean; capacity: number; seatsPerRow: number; blockedSeats: number[] };
+  vehicle: { label: string; plate: string | null; airConditioned: boolean; capacity: number; seatsPerRow: number; blockedSeats: number[]; layout?: SeatLayout | null };
   direction: Direction;
   /** Cities shown on the card ("UGB", "Dakar"). */
   from: string;

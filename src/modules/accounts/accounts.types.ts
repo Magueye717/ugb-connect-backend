@@ -11,19 +11,29 @@ export const EDIT_WINDOW_DAYS = 3;
  * place_editor / restaurant_editor / shop_editor: add and update the campus places, private restaurants, shops ·
  * caravan_editor: registers the caravan organizers (transport companies, amicales) and their owner.
  */
-export const PLATFORM_ROLES = ['admin', 'content_editor', 'resto_u_staff', 'lost_office', 'academic_editor', 'finance', 'place_editor', 'restaurant_editor', 'shop_editor', 'caravan_editor'] as const;
+export const PLATFORM_ROLES = [
+  'admin', 'content_editor', 'resto_u_staff', 'lost_office', 'academic_editor', 'finance', 'place_editor', 'restaurant_editor', 'shop_editor', 'caravan_editor',
+  'payments_manager', 'notifications_sender', 'team_manager', 'event_moderator',
+] as const;
 export type PlatformRole = (typeof PLATFORM_ROLES)[number];
+/**
+ * Roles the super admin role does NOT include: switching Wave / Orange Money off and on, sending a notification
+ * from the back office, managing the UGB Connect team. Each must be given on its own, admin or not.
+ */
+export const EXPLICIT_ROLES: readonly PlatformRole[] = ['payments_manager', 'notifications_sender', 'team_manager'];
 /** How the team list and the notifications name each role. */
 export const PLATFORM_ROLE_LABELS: Record<PlatformRole, string> = {
   admin: 'Super administrateur', content_editor: 'Communication (alertes, bannières)', resto_u_staff: 'Restaurant universitaire', lost_office: 'Bureau des objets trouvés',
   academic_editor: 'Scolarité', finance: 'Finances', place_editor: 'Lieux', restaurant_editor: 'Restaurants privés', shop_editor: 'Boutiques', caravan_editor: 'Organisateurs de caravanes',
+  payments_manager: 'Paiements (Wave, Orange Money)', notifications_sender: 'Envoi de notifications', team_manager: 'Équipe UGB Connect',
+  event_moderator: 'Validation des événements',
 };
 /**
  * The app's work spaces opened by platform roles (admins open them all). A student keeps the student space as
  * home and reaches these from "Mes espaces"; so does anyone holding several roles.
  */
 export const ROLE_SPACES = [
-  { space: 'admin', label: 'Administration', roles: ['admin'] },
+  { space: 'admin', label: 'Administration', roles: ['admin', 'team_manager', 'event_moderator'] },
   { space: 'resto', label: 'Restaurant universitaire', roles: ['resto_u_staff'] },
   { space: 'alerts', label: 'Communication', roles: ['content_editor', 'academic_editor'] },
   { space: 'directory', label: 'Référencement', roles: ['place_editor', 'restaurant_editor', 'shop_editor', 'caravan_editor'] },
@@ -80,10 +90,14 @@ export type Audience = { campuses: Campus[]; ufrs: UfrCode[]; regions: Region[] 
 /** What a viewer is matched on: null for accounts without a student profile (they see whole-university items only). */
 export type AudienceProfile = { campus: Campus; ufr: UfrCode | null; region: Region | null; village?: string | null } | null;
 
-/** Student numbers: P then digits, 12 characters at most ("P232055"), spaces removed and upper-cased first. */
-/** A student number: P then digits, 4 characters at least (« P123 »), 20 at most. */
+/** A student number: P then at least 4 digits (« P1234 »), 20 characters at most; spaces removed, upper-cased first. */
 export const STUDENT_NUMBER_MAX = 20;
-export const STUDENT_NUMBER_RE = /^P\d{3,19}$/;
+export const STUDENT_NUMBER_RE = /^P\d{4,19}$/;
+/**
+ * What the database accepts: the previous rule (P then 3 digits or more). Numbers saved under it stay valid (their
+ * accounts can still be updated), and the deploy doesn't have to rewrite the collection's validator.
+ */
+export const STORED_STUDENT_NUMBER_RE = /^P\d{3,19}$/;
 export const ROOM_RE = /^[A-Z]?\d{1,4}[A-Z]?$/;
 export const NAME_RE = /^[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[ '-][A-Za-zÀ-ÖØ-öø-ÿ]+)*$/;
 

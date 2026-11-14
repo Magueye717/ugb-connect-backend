@@ -16,7 +16,7 @@ afterAll(async () => t.close());
 
 const DAY = 24 * 3_600_000;
 type Who = { userId: string };
-async function call(who: Who, method: 'GET' | 'POST' | 'PUT', url: string, payload?: object) {
+async function call(who: Who, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: object) {
   const { accessToken } = await t.c.modules.identity.startSession({ _id: new ObjectId(who.userId), platformRoles: [] });
   return t.app.inject({ method, url: `/api/v1${url}`, headers: bearer(accessToken), payload });
 }
@@ -86,6 +86,17 @@ describe('ads', () => {
     await pay(b.payment.reference);
     expect(await ok(call(s, 'POST', `/me/banners/${b.banner.id}/cancel`))).toMatchObject({ status: 'cancelled', refunded: true });
     expect((await call(s, 'POST', `/me/banners/${b.banner.id}/cancel`)).statusCode).toBe(409);
+
+    // Settled (refused, cancelled): off « Mes publicités » with a swipe. Waiting for its review: cancel first.
+    const c = await ok(ad(s, day(5)), 201);
+    await pay(c.payment.reference);
+    expect(json(await call(s, 'DELETE', `/me/banners/${c.banner.id}`)).code).toBe('BANNER_PENDING');
+    expect((await call(s, 'DELETE', `/me/banners/${a.banner.id}`)).statusCode).toBe(204);
+    expect((await call(s, 'DELETE', `/me/banners/${b.banner.id}`)).statusCode).toBe(204);
+    const left = (await ok(call(s, 'GET', '/me/banners'))).items.map((x: { id: string }) => x.id);
+    expect(left).toEqual([c.banner.id]);
+    // Someone else's: not found.
+    expect((await call(await registerStudent(t), 'DELETE', `/me/banners/${c.banner.id}`)).statusCode).toBe(404);
   });
 
   it('a bad link is refused; the carousel has room for 6 banners a day', async () => {

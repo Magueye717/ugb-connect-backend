@@ -907,8 +907,30 @@ export class EventsService {
     return { refunded: payoutIds.length };
   }
 
+  /**
+   * « Supprimer » from the organizer's list (swipe). Never published (draft, under review, to correct, refused):
+   * deleted for good, its photos released. Over (cancelled, or ended): only taken off the list, its tickets and
+   * history kept. On sale and not over yet: refused, cancel it first (the tickets are refunded).
+   */
+  async remove(orgId: ObjectId, id: ObjectId) {
+    const e = await this.own(orgId, id);
+    const now = this.clock.now();
+    const live = (e.status === 'approved' || e.status === 'published') && e.endsAt > now;
+    if (live) throw errors.conflict('EVENT_LIVE', 'Cet événement est en ligne : annule-le d’abord (les billets sont remboursés).');
+    if (['draft', 'pending_review', 'changes_requested', 'rejected'].includes(e.status) && !(await this.bookings.countDocuments({ eventId: id }, { limit: 1 }))) {
+      await withTransaction(this.mongo, async (session) => {
+        if (e.publication && !e.publication.paidAt) await this.payments.cancelInSession(e.publication.paymentId, session);
+        await this.events.deleteOne({ _id: id, orgId }, { session });
+      });
+      await this.media.release(e.images.map((i) => i.mediaId));
+      return { deleted: true };
+    }
+    await this.events.updateOne({ _id: id, orgId }, { $set: { removedAt: now, updatedAt: now } });
+    return { deleted: false };
+  }
+
   async listForOrg(orgId: ObjectId) {
-    const docs = await this.events.find({ orgId }).sort({ startsAt: -1 }).limit(100).toArray();
+    const docs = await this.events.find({ orgId, removedAt: { $exists: false } }).sort({ startsAt: -1 }).limit(100).toArray();
     return this.orgViews(docs);
   }
 

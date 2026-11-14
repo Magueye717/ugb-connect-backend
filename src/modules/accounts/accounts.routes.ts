@@ -20,9 +20,11 @@ type Deps = {
   /** Deletes pictures nothing references any more (the media module). */
   releaseImages: (mediaIds: (ObjectId | null)[]) => Promise<number>;
   requireAdmin: preHandlerHookHandler;
+  /** Creating staff accounts and giving roles: the team manager's. */
+  requireTeam: preHandlerHookHandler;
 };
 
-export function registerAccountsRoutes(root: FastifyInstance, { service, audit, requireStudent, requireAdmin, claimImage, releaseImages }: Deps) {
+export function registerAccountsRoutes(root: FastifyInstance, { service, audit, requireStudent, requireAdmin, requireTeam, claimImage, releaseImages }: Deps) {
   const app = root.withTypeProvider<TypeBoxTypeProvider>();
   const me = (req: Parameters<typeof actorOf>[0]) => toObjectId(actorOf(req).userId);
 
@@ -119,9 +121,15 @@ export function registerAccountsRoutes(root: FastifyInstance, { service, audit, 
 
   // ---- Admin (Swagger is the temporary back office, decision Q-12) -----------------------------------------
 
+  app.get(
+    '/admin/stats/students',
+    { preHandler: [requireAuth, requireAdmin], schema: { tags: ['admin'], description: 'Students on the platform and sign-ups today.', response: { 200: Type.Object({ students: Type.Integer(), signupsToday: Type.Integer() }) } } },
+    async () => service.studentStats(),
+  );
+
   app.post(
     '/admin/users',
-    { preHandler: [requireAuth, requireAdmin], schema: { tags: ['admin'], body: CreateStaffUserBody, response: { 201: Type.Object({ id: Type.String() }) } } },
+    { preHandler: [requireAuth, requireTeam], schema: { tags: ['admin'], body: CreateStaffUserBody, response: { 201: Type.Object({ id: Type.String() }) } } },
     async (req, reply) => {
       const user = await service.createStaffUser(req.body);
       await audit.record({ actor: { type: 'user', id: actorOf(req).userId }, action: 'user.create_staff', target: { type: 'user', id: user._id.toHexString() }, requestId: req.id });
@@ -131,7 +139,7 @@ export function registerAccountsRoutes(root: FastifyInstance, { service, audit, 
 
   app.put(
     '/admin/users/:id/platform-roles',
-    { preHandler: [requireAuth, requireAdmin], schema: { tags: ['admin'], params: IdParams, body: PlatformRolesBody } },
+    { preHandler: [requireAuth, requireTeam], schema: { tags: ['admin'], params: IdParams, body: PlatformRolesBody } },
     async (req, reply) => {
       const user = await service.setPlatformRoles(toObjectId(req.params.id), req.body.roles);
       await audit.record({

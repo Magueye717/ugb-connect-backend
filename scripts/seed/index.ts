@@ -188,7 +188,15 @@ try {
     for (const v of vehicles) {
       const orgId = orgIds.get(v.org)!;
       const existing = await c.mongo.db.collection('vehicles').findOne({ plate: v.plate });
-      vehicleIds.set(v.plate, existing?._id ?? (await caravans.createVehicle(orgId, { label: v.label, plate: v.plate, capacity: v.capacity, airConditioned: v.airConditioned }))._id);
+      if (existing) {
+        vehicleIds.set(v.plate, existing._id);
+        continue;
+      }
+      const created = await caravans.createVehicle(orgId, { label: v.label, plate: v.plate, capacity: v.capacity, airConditioned: v.airConditioned });
+      // A catalog vehicle: its plan, as when an organizer picks it in the app.
+      const model = v.model ? await c.mongo.db.collection('vehicle_models').findOne({ key: v.model }) : null;
+      if (model) await c.mongo.db.collection('vehicles').updateOne({ _id: created._id }, { $set: { model: model.key, layout: model.layout, capacity: model.capacity } });
+      vehicleIds.set(v.plate, created._id);
     }
     const now = Date.now();
     const iso = (min: number) => new Date(now + min * 60_000).toISOString();

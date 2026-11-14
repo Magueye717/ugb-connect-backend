@@ -29,6 +29,7 @@ import {
   type Stop,
   type VehicleDoc,
 } from './caravans.types.js';
+import { seatKinds, type VehicleModelDoc } from './vehicle-models.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -88,6 +89,7 @@ export function deadlines(departureAt: Date, now: Date) {
 
 export class CaravansService {
   private readonly vehicles: Collection<VehicleDoc>;
+  private readonly models: Collection<VehicleModelDoc>;
   private readonly departures: Collection<DepartureDoc>;
   private readonly bookings: Collection<BookingDoc>;
 
@@ -104,6 +106,7 @@ export class CaravansService {
     private readonly notifications: NotificationsApi,
   ) {
     this.vehicles = db.collection('vehicles');
+    this.models = db.collection('vehicle_models');
     this.departures = db.collection('departures');
     this.bookings = db.collection('bookings');
   }
@@ -205,6 +208,7 @@ export class CaravansService {
       seatsPerRow: d.vehicle.seatsPerRow,
       firstRowSeats: FIRST_ROW_SEATS,
       blocked: d.vehicle.blockedSeats,
+      rows: d.vehicle.layout ?? null,
       taken,
       suggested: this.candidates(d, new Set(taken))[0] ?? null,
     };
@@ -214,6 +218,10 @@ export class CaravansService {
   private candidates(d: DepartureDoc, taken: Set<number>) {
     const per = d.vehicle.seatsPerRow;
     const free = Array.from({ length: d.vehicle.capacity }, (_, i) => i + 1).filter((n) => !taken.has(n) && !d.vehicle.blockedSeats.includes(n));
+    if (d.vehicle.layout) {
+      const kinds = seatKinds(d.vehicle.layout);
+      return [...free.filter((n) => kinds.get(n) === 'window'), ...free.filter((n) => kinds.get(n) === 'aisle'), ...free.filter((n) => kinds.get(n) === 'middle')];
+    }
     return [...free.filter((n) => isWindow(n, per)), ...free.filter((n) => !isWindow(n, per) && !isMiddle(n, per)), ...free.filter((n) => isMiddle(n, per))];
   }
 
@@ -896,12 +904,14 @@ export class CaravansService {
     const v = await this.vehicles.findOne({ _id: id, orgId, status: 'active' });
     if (!v) throw errors.notFound('Véhicule introuvable.');
     const now = this.clock.now();
-    const set = { label: input.label.trim(), capacity: input.capacity, airConditioned: input.airConditioned, seatsPerRow: input.seatsPerRow ?? v.seatsPerRow, blockedSeats: v.blockedSeats.filter((n) => n <= input.capacity) };
+    // A vehicle of the catalog keeps its plan (and so its seats): only its name and air conditioning change.
+    const capacity = v.layout ? v.capacity : input.capacity;
+    const set = { label: input.label.trim(), capacity, airConditioned: input.airConditioned, seatsPerRow: v.layout ? v.seatsPerRow : (input.seatsPerRow ?? v.seatsPerRow), blockedSeats: v.blockedSeats.filter((n) => n <= capacity) };
     await this.vehicles.updateOne({ _id: id }, { $set: { ...set, updatedAt: now } });
     const updated = { ...v, ...set };
     await this.departures.updateMany(
       { vehicleId: id, status: 'draft' },
-      { $set: { vehicle: { label: updated.label, plate: updated.plate, airConditioned: updated.airConditioned, capacity: updated.capacity, seatsPerRow: updated.seatsPerRow, blockedSeats: updated.blockedSeats }, updatedAt: now } },
+      { $set: { vehicle: { label: updated.label, plate: updated.plate, airConditioned: updated.airConditioned, capacity: updated.capacity, seatsPerRow: updated.seatsPerRow, blockedSeats: updated.blockedSeats, layout: updated.layout ?? null }, updatedAt: now } },
     );
     return updated;
   }
@@ -918,6 +928,29 @@ export class CaravansService {
       );
     }
     await this.vehicles.updateOne({ _id: id }, { $set: { status: 'retired', updatedAt: this.clock.now() } });
+  }
+
+  /** The catalog: every organization picks from it (buses, then minibuses, as seeded). */
+  listModels() {
+    return this.models.find({}).sort({ sortOrder: 1 }).toArray();
+  }
+
+  /**
+   * The organization's vehicle for a catalog model: the one it already has, else a new one with the model's name and
+   * plan. Owners and managers both (it's how a departure gets its bus).
+   */
+  async vehicleFromModel(orgId: ObjectId, key: string) {
+    const existing = await this.vehicles.findOne({ orgId, model: key, status: 'active' });
+    if (existing) return existing;
+    const m = await this.models.findOne({ key });
+    if (!m) throw errors.notFound('Modèle de véhicule inconnu.');
+    const now = this.clock.now();
+    const doc: VehicleDoc = {
+      _id: new ObjectId(), orgId, label: m.label, plate: null, airConditioned: false, capacity: m.capacity, seatsPerRow: m.kind === 'bus' ? 4 : 3,
+      blockedSeats: [], model: m.key, layout: m.layout, status: 'active', createdAt: now, updatedAt: now,
+    };
+    await this.vehicles.insertOne(doc);
+    return doc;
   }
 
   listVehicles(orgId: ObjectId) {
@@ -957,7 +990,7 @@ export class CaravansService {
     const bookingClosesAt = input.bookingClosesAt ? new Date(input.bookingClosesAt) : defaultClose;
     if (confirmBy > departureAt || bookingClosesAt > departureAt) throw errors.validation('Les échéances doivent précéder le départ.', { field: 'confirmBy' });
     return {
-      vehicle: { label: vehicle.label, plate: vehicle.plate, airConditioned: vehicle.airConditioned, capacity: vehicle.capacity, seatsPerRow: vehicle.seatsPerRow, blockedSeats: vehicle.blockedSeats },
+      vehicle: { label: vehicle.label, plate: vehicle.plate, airConditioned: vehicle.airConditioned, capacity: vehicle.capacity, seatsPerRow: vehicle.seatsPerRow, blockedSeats: vehicle.blockedSeats, layout: vehicle.layout ?? null },
       direction: input.direction,
       from: input.from.trim(),
       to: input.to.trim(),
@@ -1035,7 +1068,7 @@ export class CaravansService {
         const taken = new Set((await this.bookings.find({ departureId: id, seatActive: true }, { projection: { seat: 1 } }).toArray()).map((b) => b.seat));
         if (v.blockedSeats.some((n) => taken.has(n))) throw errors.validation('Une place déjà vendue n’existe pas dans ce véhicule.', { field: 'vehicleId' });
       }
-      vehicle = { label: v.label, plate: v.plate, airConditioned: v.airConditioned, capacity: v.capacity, seatsPerRow: v.seatsPerRow, blockedSeats: v.blockedSeats };
+      vehicle = { label: v.label, plate: v.plate, airConditioned: v.airConditioned, capacity: v.capacity, seatsPerRow: v.seatsPerRow, blockedSeats: v.blockedSeats, layout: v.layout ?? null };
       vehicleId = v._id;
     }
     await this.departures.updateOne({ _id: id, status: d.status }, { $set: { pickups, dropoffs, vehicle, vehicleId, updatedAt: now } });

@@ -10,9 +10,10 @@ import type { FileRef, MediaDoc, MediaPurpose, MediaUsage } from './media.types.
 
 /** Longest side after re-encoding: sharp on a phone, light on mobile data. */
 const MAX_SIDE = 1600;
-/** Smallest accepted side: a blurry thumbnail makes a bad banner. */
-const MIN_SIDE = 320;
-const ACCEPTED = new Set(['jpeg', 'png', 'webp', 'heif', 'avif']);
+/** Smallest accepted side: below that it's an icon, not a photo. Small pictures are kept as they are (never blown up). */
+const MIN_SIDE = 120;
+/** Every photo format a phone or a computer gives (an animated GIF keeps its first frame); all re-encoded to WebP. */
+const ACCEPTED = new Set(['jpeg', 'png', 'webp', 'heif', 'avif', 'gif', 'tiff']);
 /** An upload is attached by a second request (the form is saved after the picture is sent): left alone this long. */
 const UNATTACHED_GRACE_MS = 24 * 3600_000;
 /** A picture found in use is checked again this much later (its entity may have been deleted since). */
@@ -55,17 +56,19 @@ export class MediaService {
    * Checks an uploaded picture and keeps a clean copy: the real format is read from the bytes (not the file name),
    * the photo is turned upright, resized, re-encoded to WebP and stripped of its metadata (GPS position…).
    */
-  async upload(ownerId: ObjectId, purpose: MediaPurpose, input: Buffer, apiBase: string): Promise<MediaDoc> {
-    await this.limiter.hit(`media-upload:${ownerId.toHexString()}`, { limit: 40, windowS: 3600 }, 'Trop d’images envoyées. Réessaie dans une heure.');
+  async upload(ownerId: ObjectId, purpose: MediaPurpose, input: Buffer, apiBase: string, opts: { unlimited?: boolean } = {}): Promise<MediaDoc> {
+    // The campus team filling the directory (dozens of photos per place, per menu) isn't held to the hourly limit.
+    if (!opts.unlimited) await this.limiter.hit(`media-upload:${ownerId.toHexString()}`, { limit: 60, windowS: 3600 }, 'Trop d’images envoyées. Réessaie dans une heure.');
     let meta: Metadata;
     try {
       meta = await sharp(input).metadata();
     } catch {
       throw errors.validation('Ce fichier n’est pas une image.', { field: 'file' });
     }
-    if (!meta.format || !ACCEPTED.has(meta.format)) throw errors.validation('Formats acceptés : JPEG, PNG, WebP, HEIC.', { field: 'file' });
+    if (!meta.format || !ACCEPTED.has(meta.format)) throw errors.validation('Ce format d’image n’est pas accepté : choisis une photo (JPEG, PNG, WebP, HEIC).', { field: 'file' });
     if ((meta.width ?? 0) < MIN_SIDE && (meta.height ?? 0) < MIN_SIDE) throw errors.validation(`Image trop petite : au moins ${MIN_SIDE} pixels de côté.`, { field: 'file' });
-    const { data, info } = await sharp(input, { failOn: 'error' })
+    // Lenient on slightly damaged files (a photo cut short by a messaging app still opens): only unreadable ones fail.
+    const { data, info } = await sharp(input, { failOn: 'none', limitInputPixels: false, pages: 1 })
       .rotate()
       .resize({ width: MAX_SIDE, height: MAX_SIDE, fit: 'inside', withoutEnlargement: true })
       .webp({ quality: 80 })

@@ -25,7 +25,7 @@ const types = async (who: Who) => (await ok(call(who, 'GET', '/notifications')))
 /** A business created by an admin, open all day (the test clock is 10:00 in Dakar). */
 async function business(kind: 'restaurant' | 'shop', extra: object = {}) {
   t.clock.set(T0);
-  const admin = await createStaff(t, ['admin']);
+  const admin = await createStaff(t, ['admin', 'team_manager', 'payments_manager', 'notifications_sender']);
   const phone = nextPhone();
   const b = await ok(
     call(admin, 'POST', '/admin/businesses', {
@@ -171,6 +171,26 @@ describe('payment methods', () => {
     );
     expect(created.paymentMethods).toEqual([{ value: 'cash', label: 'Espèces' }]);
     expect(created.services).toEqual([{ start: '08:00', end: '12:00' }, { start: '18:00', end: '22:00' }]);
+
+    // Hours as people write them: closing at 00:00 is midnight; a closing before the opening runs past midnight.
+    const late = await ok(
+      call(admin, 'POST', '/admin/businesses', {
+        kind: 'restaurant', name: 'Le Nocturne', specialties: ['Grillades'], owner: { phone: nextPhone(), firstName: 'Awa', lastName: 'Sarr' },
+        services: [{ start: '12:00', end: '15:00' }, { start: '19:00', end: '02:00' }],
+      }),
+      201,
+    );
+    expect(late.services).toEqual([{ start: '00:00', end: '02:00' }, { start: '12:00', end: '15:00' }, { start: '19:00', end: '24:00' }]);
+    expect(late.hours).toBe('12h-15h · 19h-2h');
+    const midnight = await ok(
+      call(admin, 'POST', '/admin/businesses', {
+        kind: 'shop', name: 'Boutique Minuit', specialties: ['Épicerie'], owner: { phone: nextPhone(), firstName: 'Ibou', lastName: 'Fall' },
+        services: [{ start: '08:00', end: '00:00' }],
+      }),
+      201,
+    );
+    expect(midnight.services).toEqual([{ start: '08:00', end: '24:00' }]);
+    expect(midnight.hours).toBe('8h-minuit');
   });
 
   it('« client absent »: the order is cancelled and counted; 3 within 30 days and the student can’t order for 7 days', async () => {
@@ -438,7 +458,7 @@ describe('référencement', () => {
     const editorId = new ObjectId(String(shopEditor.userId));
     const many = await Promise.all(Array.from({ length: 8 }, async () => (await t.c.modules.media.service.upload(editorId, 'business', await picture(), 'http://localhost/api/v1'))._id.toHexString()));
     expect((await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { photoIds: many }))).photoIds).toEqual(many);
-    expect((await ok(call(shopEditor, 'GET', '/reference/commerce'))).editorMaxItemPhotos).toBe(30);
+    expect((await ok(call(shopEditor, 'GET', '/reference/commerce'))).editorMaxItemPhotos).toBe(300);
     // 0 stays 0 (sold out), null stays null (no stock count): neither is coerced into the other.
     expect(await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { stock: 0 }))).toMatchObject({ stock: 0, soldOut: true });
     expect((await ok(call(shopEditor, 'PATCH', `/admin/businesses/${b.id}/catalog/${cahier.id}`, { stock: null }))).stock).toBe(null);
